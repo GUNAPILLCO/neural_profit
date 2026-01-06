@@ -1,0 +1,14 @@
+{
+  "n_files": 22,
+  "n_rows_total": 1902941,
+  "min_datetime": "2019-12-23 03:01:00",
+  "max_datetime": "2025-06-16 00:03:00",
+  "columns": [
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume"
+  ],
+  "index_name": "datetime"
+}
