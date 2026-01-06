@@ -43,3 +43,32 @@ stages:
       hash: md5
       md5: 5fb4f3445f930751bcd7bef2673f6e89
       size: 559
+  stage_02_data_quality_validation:
+    cmd: "python src/neural_profit/stages/stage_02_data_quality_validation.py --input
+      data/processed/mnq_intraday.parquet --output reports/data_validation.json --expected_freq_seconds
+      60 --expected_minutes_per_day 451 --max_incomplete_days_ratio 0.01 --max_gap_seconds
+      60 --max_total_nan_ratio 0.001 --max_col_nan_ratio 0.002\n"
+    deps:
+    - path: data/processed/mnq_intraday.parquet
+      hash: md5
+      md5: d228bdc8e0fd4298bed3102849f8854e
+      size: 13780160
+    - path: src/neural_profit/stages/stage_02_data_quality_validation.py
+      hash: md5
+      md5: 24d09230b72bc611a1e70828b642d284
+      size: 9297
+    params:
+      params.yaml:
+        data_quality:
+          expected_freq_seconds: 60
+          expected_minutes_per_day: 451
+          max_incomplete_days_ratio: 0.01
+          max_gap_seconds: 60
+          max_total_nan_ratio: 0.001
+          max_col_nan_ratio: 0.002
+          allow_weekends: true
+    outs:
+    - path: reports/data_validation.json
+      hash: md5
+      md5: a9ecbc39470df18f5d356178a5820af0
+      size: 803

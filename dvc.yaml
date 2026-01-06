@@ -45,3 +45,53 @@ stages:
       # Summary liviano de preparación del dataset
       - reports/dataset_prep_summary.json:
           cache: false
+
+
+  # ------------------------------------------------------------
+  # Stage 02 – Data quality validation (Quality Gate)
+  # ------------------------------------------------------------
+  # Objetivo:
+  # - Validación formal de la calidad del dataset intradía.
+  # - Actúa como “quality gate”: si falla, corta el pipeline (exit code != 0).
+  #
+  # Valida (ejemplos):
+  # - Duplicados por (date, timestamp)
+  # - Gaps intradía (saltos > 1 minuto, o > umbral)
+  # - Días incompletos (menos minutos que los esperados)
+  # - %NaNs total y por columna
+  # - Valores inválidos (high<low, close fuera de rango, volume<0, etc.)
+  #
+  # Input:
+  # - data/processed/mnq_intraday.parquet
+  #
+  # Output / Artefactos:
+  # - reports/data_validation.json (PASS/FAIL + métricas)
+  #
+  # DVC:
+  # - Versiona reports/data_validation.json
+  #
+  # MLflow:
+  # - Log de métricas + tag quality_pass
+
+  stage_02_data_quality_validation:
+    cmd: >
+      python src/neural_profit/stages/stage_02_data_quality_validation.py
+      --input data/processed/mnq_intraday.parquet
+      --output reports/data_validation.json
+      --expected_freq_seconds ${data_quality.expected_freq_seconds}
+      --expected_minutes_per_day ${data_quality.expected_minutes_per_day}
+      --max_incomplete_days_ratio ${data_quality.max_incomplete_days_ratio}
+      --max_gap_seconds ${data_quality.max_gap_seconds}
+      --max_total_nan_ratio ${data_quality.max_total_nan_ratio}
+      --max_col_nan_ratio ${data_quality.max_col_nan_ratio}
+
+    deps:
+      - src/neural_profit/stages/stage_02_data_quality_validation.py
+      - data/processed/mnq_intraday.parquet              
+
+    outs:
+      - reports/data_validation.json:
+          persist: true
+
+    params:
+      - data_quality

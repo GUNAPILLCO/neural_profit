@@ -1,0 +1,10 @@
+data_quality:
+  expected_freq_seconds: 60
+  expected_minutes_per_day: 451
+
+  max_incomplete_days_ratio: 0.01     # 1% de días pueden ser incompletos
+  max_gap_seconds: 60                 # no se permite gap > 60s (1 min)
+  max_total_nan_ratio: 0.001          # 0.1% NaNs total
+  max_col_nan_ratio: 0.002            # 0.2% NaNs por columna
+
+  allow_weekends: true                # por si hay días sin mercado en dataset
