@@ -1,0 +1,27 @@
+{
+  "input": {
+    "total_days_raw": 1756
+  },
+  "output": {
+    "trading_session_complete_days": 1303,
+    "expected_records_per_day": 571,
+    "trading_time_range": {
+      "start_time": "06:30:00",
+      "end_time": "16:00:00"
+    }
+  },
+  "records_per_day": {
+    "min": 571,
+    "median": 571.0,
+    "max": 571
+  },
+  "quality_checks": {
+    "total_nans": 0,
+    "discarded_days": 453,
+    "discarded_days_pct": 25.7973
+  },
+  "metadata": {
+    "market": "NASDAQ",
+    "trading_hours": "06:30:00-16:00:00 America/New_York"
+  }
+}

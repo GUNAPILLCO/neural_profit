@@ -1,4 +1,11 @@
 stages:
+
+  # ------------------------------------------------------------
+  # Stage 00 – Raw data ingestion
+  # ------------------------------------------------------------
+  # - Descarga / ingesta de datos crudos
+  # - Genera el parquet raw versionado por DVC
+  # - Produce un summary básico de ingestión
   stage_00_raw_data_ingestion:
     cmd: python src/neural_profit/stages/stage_00_raw_data_ingestion.py
     deps:
@@ -8,4 +15,33 @@ stages:
       - data/raw/mnq_raw.parquet
     metrics:
       - reports/ingest_summary.json:
+          cache: false   # Métrica liviana, se guarda en Git
+
+
+  # ------------------------------------------------------------
+  # Stage 01 – Intraday data preparation
+  # ------------------------------------------------------------
+  # - Normaliza zona horaria
+  # - Filtra días hábiles NASDAQ
+  # - Filtra horario de trading
+  # - Elimina días incompletos o con gaps
+  # - Genera dataset intradía limpio + summary de calidad
+  stage_01_intraday_data_preparation:
+    cmd: >
+      python src/neural_profit/stages/stage_01_intraday_data_preparation.py
+      --raw-path data/raw/mnq_raw.parquet
+      --out-parquet data/processed/mnq_intraday.parquet
+      --out-summary reports/dataset_prep_summary.json
+    deps:
+      # Script del stage
+      - src/neural_profit/stages/stage_01_intraday_data_preparation.py
+
+      # Output del stage_00 (input de este stage)
+      - data/raw/mnq_raw.parquet
+    outs:
+      # Dataset procesado (artefacto pesado → DVC)
+      - data/processed/mnq_intraday.parquet
+    metrics:
+      # Summary liviano de preparación del dataset
+      - reports/dataset_prep_summary.json:
           cache: false
