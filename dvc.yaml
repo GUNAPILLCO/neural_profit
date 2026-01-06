@@ -1,0 +1,11 @@
+stages:
+  stage_00_raw_data_ingestion:
+    cmd: python src/neural_profit/stages/stage_00_raw_data_ingestion.py
+    deps:
+      - src/neural_profit/stages/stage_00_raw_data_ingestion.py
+      - data/source
+    outs:
+      - data/raw/mnq_raw.parquet
+    metrics:
+      - reports/ingest_summary.json:
+          cache: false
