@@ -1,4 +1,6 @@
 [core]
-    remote = gdrive
+    remote = localdrive
 ['remote "gdrive"']
     url = gdrive://1CZmEoX-3oVCz3-9tjz0GAXWHhXokc0K0
+['remote "localdrive"']
+    url = G:\Mi uidad\neural_profit\dvc
