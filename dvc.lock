@@ -1,0 +1,23 @@
+schema: '2.0'
+stages:
+  stage_00_raw_data_ingestion:
+    cmd: python src/neural_profit/stages/stage_00_raw_data_ingestion.py
+    deps:
+    - path: data/source
+      hash: md5
+      md5: 918f120b04627d59b0d27aea55ec6049.dir
+      size: 99896000
+      nfiles: 22
+    - path: src/neural_profit/stages/stage_00_raw_data_ingestion.py
+      hash: md5
+      md5: 1401cbea1471d2cb7e9476105ac37f5f
+      size: 6745
+    outs:
+    - path: data/raw/mnq_raw.parquet
+      hash: md5
+      md5: 7926c5d3729c93ec15fbff34007adcdf
+      size: 33576640
+    - path: reports/ingest_summary.json
+      hash: md5
+      md5: 4ba21dbff97ee00e2c8942dad1fa9ca6
+      size: 250
