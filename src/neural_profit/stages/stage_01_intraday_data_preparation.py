@@ -241,7 +241,7 @@ def build_dataset_prep_summary(
     start_time: str,
     end_time: str,
     market: str,
-    trading_hours_label: str,
+    trading_hours_label: str, 
 ) -> Dict[str, Any]:
     """
     Construye el summary requerido para reports/dataset_prep_summary.json.
