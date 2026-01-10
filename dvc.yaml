@@ -95,3 +95,37 @@ stages:
 
     params:
       - data_quality
+
+      # ------------------------------------------------------------
+  # Stage 03 – Target definition (trade/hold) 60/90
+  # ------------------------------------------------------------
+  # - Genera mnq_intraday_labeled.parquet con:
+  #   delta_pts_{h}, trade_{h}, hold_{h}
+  # - Genera summary liviano en JSON (métrica)
+  stage_03_target_definition:
+    cmd: >
+      python src/neural_profit/stages/stage_03_target_definition.py
+      --input-path data/processed/mnq_intraday.parquet
+      --output-labeled-path data/processed/mnq_intraday_labeled.parquet
+      --summary-path reports/target_definition_summary.json
+      --date-col date
+      --close-col close
+      --horizons 60 90
+      --base-pts ${target_definition.base_pts}
+      --ext-pts ${target_definition.ext_pts}
+
+    deps:
+      - src/neural_profit/stages/stage_03_target_definition.py
+      - data/processed/mnq_intraday.parquet
+
+    outs:
+      - data/processed/mnq_intraday_labeled.parquet
+
+    metrics:
+      - reports/target_definition_summary.json:
+          cache: false
+
+    params:
+      - target_definition.horizons
+      - target_definition.base_pts
+      - target_definition.ext_pts

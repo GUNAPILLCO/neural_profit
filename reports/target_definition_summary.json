@@ -1,0 +1,194 @@
+{
+  "stage": "stage_03_target_definition",
+  "description": "Definición explícita de variables objetivo (trade/hold) para horizontes 60/90. Cálculo por día sin cruzar sesiones: groupby(date) + shift(-h).",
+  "input": "data/processed/mnq_intraday.parquet",
+  "output_labeled": "data/processed/mnq_intraday_labeled.parquet",
+  "artifacts": [
+    "reports/target_definition_summary.json"
+  ],
+  "params": {
+    "horizons": [
+      60,
+      90
+    ],
+    "base_pts": 25.0,
+    "ext_pts": 62.5,
+    "drop_na_targets": false,
+    "date_col": "date",
+    "close_col": "close"
+  },
+  "dataset_info": {
+    "n_rows": 744013,
+    "n_cols": 12,
+    "datetime_min": "2019-12-23 06:30:00-05:00",
+    "datetime_max": "2025-06-13 16:00:00-04:00",
+    "timezone": "America/New_York",
+    "n_days": 1303,
+    "minutes_per_day_describe": {
+      "count": 1303.0,
+      "mean": 571.0,
+      "std": 0.0,
+      "min": 571.0,
+      "25%": 571.0,
+      "50%": 571.0,
+      "75%": 571.0,
+      "max": 571.0
+    },
+    "final_target_columns": [
+      "delta_pts_60",
+      "delta_pts_90",
+      "trade_60",
+      "trade_90",
+      "hold_60",
+      "hold_90"
+    ]
+  },
+  "targets": {
+    "h60": {
+      "horizon_min": 60,
+      "definition": {
+        "delta_pts": "close_{t+h} - close_t",
+        "trade": "+1 if delta>= 25.0, -1 if delta<= -25.0, else 0",
+        "hold": "1 if (trade=+1 and delta>= 62.5) or (trade=-1 and delta<= -62.5); else 0. Also trade=0 => hold=0."
+      },
+      "columns": {
+        "delta_pts": "delta_pts_60",
+        "trade": "trade_60",
+        "hold": "hold_60"
+      },
+      "pct_nans_delta_pts": 0.10507880910683012,
+      "delta_pts_stats": {
+        "count": 665833,
+        "mean": 0.4811319054477624,
+        "std": 59.742892493550805,
+        "min": -1007.25,
+        "p01": -174.75,
+        "p05": -95.0,
+        "p50": 2.75,
+        "p95": 86.75,
+        "p99": 155.75,
+        "max": 1456.5
+      },
+      "trade_class_counts": {
+        "0": 392771,
+        "1": 184399,
+        "-1": 166843
+      },
+      "hold_rate": 0.17626708135476127,
+      "hold_rate_given_trade": 0.37337505195847875,
+      "delta_pts_on_trade_stats": {
+        "count": 351242,
+        "mean": -0.008554643237426048,
+        "std": 81.25882070175716,
+        "min": -1007.25,
+        "p01": -212.25,
+        "p05": -125.75,
+        "p50": 26.5,
+        "p95": 112.25,
+        "p99": 187.5,
+        "max": 1456.5
+      },
+      "abs_delta_pts_on_trade_stats": {
+        "count": 351242,
+        "mean": 65.51466866149265,
+        "std": 48.070905807753945,
+        "min": 25.0,
+        "p01": 25.25,
+        "p05": 26.75,
+        "p50": 50.75,
+        "p95": 152.0,
+        "p99": 243.6475000000064,
+        "max": 1456.5
+      }
+    },
+    "h90": {
+      "horizon_min": 90,
+      "definition": {
+        "delta_pts": "close_{t+h} - close_t",
+        "trade": "+1 if delta>= 25.0, -1 if delta<= -25.0, else 0",
+        "hold": "1 if (trade=+1 and delta>= 62.5) or (trade=-1 and delta<= -62.5); else 0. Also trade=0 => hold=0."
+      },
+      "columns": {
+        "delta_pts": "delta_pts_90",
+        "trade": "trade_90",
+        "hold": "hold_90"
+      },
+      "pct_nans_delta_pts": 0.15761821366024517,
+      "delta_pts_stats": {
+        "count": 626743,
+        "mean": 0.8264491984752921,
+        "std": 74.1578142083499,
+        "min": -855.5,
+        "p01": -214.75,
+        "p05": -118.75,
+        "p50": 3.5,
+        "p95": 108.75,
+        "p99": 190.75,
+        "max": 1522.5
+      },
+      "trade_class_counts": {
+        "0": 361558,
+        "1": 203586,
+        "-1": 178869
+      },
+      "hold_rate": 0.2341908004295624,
+      "hold_rate_given_trade": 0.45558562445254996,
+      "delta_pts_on_trade_stats": {
+        "count": 382455,
+        "mean": 0.7631433763449295,
+        "std": 94.29855704183129,
+        "min": -855.5,
+        "p01": -248.25,
+        "p05": -146.25,
+        "p50": 27.75,
+        "p95": 132.75,
+        "p99": 222.25,
+        "max": 1522.5
+      },
+      "abs_delta_pts_on_trade_stats": {
+        "count": 382455,
+        "mean": 74.92938515642363,
+        "std": 57.257076502548784,
+        "min": 25.0,
+        "p01": 25.25,
+        "p05": 27.25,
+        "p50": 57.75,
+        "p95": 177.5,
+        "p99": 282.25,
+        "max": 1522.5
+      }
+    }
+  },
+  "minimum_metrics": {
+    "pct_nans_per_target": {
+      "h60": 0.10507880910683012,
+      "h90": 0.15761821366024517
+    },
+    "basic_stats_per_target": {
+      "h60": {
+        "count": 665833,
+        "mean": 0.4811319054477624,
+        "std": 59.742892493550805,
+        "min": -1007.25,
+        "p01": -174.75,
+        "p05": -95.0,
+        "p50": 2.75,
+        "p95": 86.75,
+        "p99": 155.75,
+        "max": 1456.5
+      },
+      "h90": {
+        "count": 626743,
+        "mean": 0.8264491984752921,
+        "std": 74.1578142083499,
+        "min": -855.5,
+        "p01": -214.75,
+        "p05": -118.75,
+        "p50": 3.5,
+        "p95": 108.75,
+        "p99": 190.75,
+        "max": 1522.5
+      }
+    }
+  }
+}

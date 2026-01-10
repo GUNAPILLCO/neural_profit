@@ -32,8 +32,8 @@ stages:
       size: 33576640
     - path: src/neural_profit/stages/stage_01_intraday_data_preparation.py
       hash: md5
-      md5: 13dbe72036aa12e3cf1c8486c5d92262
-      size: 18739
+      md5: d5164f5fe2eecddc8b55709c8d8837ec
+      size: 18740
     outs:
     - path: data/processed/mnq_intraday.parquet
       hash: md5
@@ -72,3 +72,33 @@ stages:
       hash: md5
       md5: a9ecbc39470df18f5d356178a5820af0
       size: 803
+  stage_03_target_definition:
+    cmd: "python src/neural_profit/stages/stage_03_target_definition.py --input-path
+      data/processed/mnq_intraday.parquet --output-labeled-path data/processed/mnq_intraday_labeled.parquet
+      --summary-path reports/target_definition_summary.json --date-col date --close-col
+      close --horizons 60 90 --base-pts 25.0 --ext-pts 62.5\n"
+    deps:
+    - path: data/processed/mnq_intraday.parquet
+      hash: md5
+      md5: d228bdc8e0fd4298bed3102849f8854e
+      size: 13780160
+    - path: src/neural_profit/stages/stage_03_target_definition.py
+      hash: md5
+      md5: e9853b46dcdd36279c37ca6ae3cd42a8
+      size: 13492
+    params:
+      params.yaml:
+        target_definition.base_pts: 25.0
+        target_definition.ext_pts: 62.5
+        target_definition.horizons:
+        - 60
+        - 90
+    outs:
+    - path: data/processed/mnq_intraday_labeled.parquet
+      hash: md5
+      md5: 3e6c938b1184de0b0f4e5f40ff388e35
+      size: 15992926
+    - path: reports/target_definition_summary.json
+      hash: md5
+      md5: 9a8be49b3b7a578d14668b68217a8c77
+      size: 5212

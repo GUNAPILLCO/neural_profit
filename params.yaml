@@ -8,3 +8,40 @@ data_quality:
   max_col_nan_ratio: 0.002            # 0.2% NaNs por columna
 
   allow_weekends: true                # por si hay días sin mercado en dataset
+
+target_definition:
+
+  # Horizontes de predicción en minutos.
+  # Para cada horizonte h se generan:
+  #   - delta_pts_h
+  #   - trade_h
+  #   - hold_h
+  #
+  # Ejemplo:
+  # horizons: [60, 90]
+  horizons: [60, 90]
+
+  # Umbral base en puntos del MNQ.
+  # Define si existe o no una operación:
+  #   trade_h = +1  si delta_pts_h >=  base_pts
+  #   trade_h = -1  si delta_pts_h <= -base_pts
+  #   trade_h =  0  en caso contrario
+  #
+  # 1 punto MNQ = 2 USD
+  # 25 pts = 50 USD
+  base_pts: 25.0
+
+  # Umbral de extensión en puntos del MNQ.
+  # Define si una operación válida alcanza un movimiento mayor:
+  #   hold_h = 1 si:
+  #     - trade_h = +1 y delta_pts_h >=  ext_pts
+  #     - trade_h = -1 y delta_pts_h <= -ext_pts
+  #
+  # Caso contrario:
+  #   hold_h = 0
+  #
+  # Restricción:
+  #   trade_h = 0  => hold_h = 0
+  #
+  # 62.5 pts ≈ 125 USD
+  ext_pts: 62.5
