@@ -1,29 +1,134 @@
+# stage_02_data_quality_validation.py
+# ------------------------------------------------------------
+# Stage_02: Data quality gate para dataset intradía MNQ.
+#
+# Objetivo:
+# - Validar que el dataset intradía procesado (stage_01) cumpla criterios mínimos
+#   de calidad antes de continuar con stages de targets/features/modelos.
+#
+# Puntos clave (temporalidad):
+# - Este stage NO genera features ni targets.
+# - Se permite "bajar" el DatetimeIndex a columna con reset_index SOLO para validar,
+#   pero se preserva trazabilidad temporal ordenando explícitamente por (date, datetime)
+#   y registrando checks de monotonía / duplicados.
+#
+# Output:
+# - JSON con PASS/FAIL + métricas + checks + ejemplos de filas inválidas.
+# ------------------------------------------------------------
+
+from __future__ import annotations
+
+import argparse
 import json
+import os
 import sys
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-import os
-import logging 
+import logging
 
 
+# ------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 log = logging.getLogger("stage_02")
 
+
+# ------------------------------------------------------------
+# MLflow (opcional)
+# ------------------------------------------------------------
 try:
     import mlflow
 except Exception:
     mlflow = None
 
 
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
 def _nan_ratio(s: pd.Series) -> float:
+    """Ratio de NaNs en una serie."""
     return float(s.isna().mean())
 
 
+def _write_report(output_path: str | Path, report: Dict[str, Any]) -> None:
+    """Escribe el reporte JSON en disco (siempre)."""
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _ensure_datetime_column(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Asegura que el DataFrame tenga una columna 'datetime' usable.
+
+    Reglas:
+    - Si el índice es DatetimeIndex: lo baja a columna con reset_index.
+      * Si ya existía una columna 'datetime' (colisión), se prioriza el índice
+        (porque es la fuente temporal principal del pipeline).
+    - Si NO hay DatetimeIndex y NO hay columna 'datetime': se considera formato inválido.
+    """
+    df = df.copy()
+
+    # Caso 1: DatetimeIndex => bajamos a columna (para validación)
+    if isinstance(df.index, pd.DatetimeIndex):
+        idx_name = df.index.name or "index"
+
+        # Blindaje contra colisión: si ya existe 'datetime' como columna
+        if "datetime" in df.columns and idx_name != "datetime":
+            # Bajamos índice a columna auxiliar
+            df = df.reset_index().rename(columns={idx_name: "datetime_index"})
+            # Priorizamos el índice (fuente temporal) como datetime definitivo
+            df["datetime"] = df["datetime_index"]
+            df.drop(columns=["datetime_index"], inplace=True)
+        else:
+            # Caso típico: el índice se llama 'datetime' o no hay 'datetime' en columnas
+            df = df.reset_index().rename(columns={idx_name: "datetime"})
+
+    # Caso 2: No DatetimeIndex => exigimos columna datetime
+    if "datetime" not in df.columns:
+        raise TypeError("No 'datetime' column found (expected it as DatetimeIndex or column).")
+
+    # Parse robusto por si datetime viene como string/object
+    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+
+    return df
+
+
+def _log_temporal_audit(df: pd.DataFrame, label: str) -> None:
+    """
+    Logs de auditoría temporal (NO modifican datos).
+    Útiles para detectar problemas de:
+    - duplicados
+    - orden no-monótono por día
+    """
+    # Duplicados globales en datetime
+    n_dup_global = int(df["datetime"].duplicated().sum())
+    log.info(f"[CHECK:{label}] datetime duplicates (global): {n_dup_global}")
+
+    # Monotonía por día (tras ordenar, debería ser True para todos)
+    if "date" in df.columns:
+        non_monotonic_days = (
+            df.groupby("date")["datetime"]
+            .apply(lambda s: not s.is_monotonic_increasing)
+        )
+        n_bad_days = int(non_monotonic_days.sum()) if len(non_monotonic_days) else 0
+        log.info(f"[CHECK:{label}] days with non-monotonic datetime: {n_bad_days}")
+
+        if n_bad_days > 0:
+            sample_days = non_monotonic_days[non_monotonic_days].index[:10].tolist()
+            log.warning(f"[WARN:{label}] Ejemplos de días no-monótonos: {sample_days}")
+
+
+# ------------------------------------------------------------
+# Core validation
+# ------------------------------------------------------------
 def validate_intraday_quality(
     input_path: str,
     output_path: str,
@@ -33,39 +138,52 @@ def validate_intraday_quality(
     max_gap_seconds: int = 60,
     max_total_nan_ratio: float = 0.001,
     max_col_nan_ratio: float = 0.002,
-) -> dict:
+) -> Dict[str, Any]:
     """
     Valida calidad de un dataset intradía y produce un reporte JSON (PASS/FAIL).
-    Asume que el timestamp puede venir como índice DatetimeIndex (tz-aware) llamado 'datetime'.
+
+    Suposiciones del dataset:
+    - Timestamp puede venir como DatetimeIndex (tz-aware o tz-naive) o como columna 'datetime'.
+    - Columnas mínimas: open, high, low, close, volume.
+
+    NOTA sobre reset_index:
+    - Se utiliza únicamente para convertir el índice temporal en columna y poder validar.
+    - No se altera el contenido temporal: se ordena explícitamente por (date, datetime).
     """
 
     # -----------------------------
     # 1) Leer dataset
     # -----------------------------
-    df = pd.read_parquet(input_path).copy()
-
-    # -----------------------------
-    # 2) Asegurar columna datetime
-    #    (si viene como índice, la bajamos a columna)
-    # -----------------------------
-    if isinstance(df.index, pd.DatetimeIndex):
-        # reset_index crea una columna con el nombre del índice si existe, o "index" si no
-        idx_name = df.index.name or "index"
-        df = df.reset_index().rename(columns={idx_name: "datetime"})
-
-    if "datetime" not in df.columns:
-        return {
+    if not Path(input_path).exists():
+        report = {
             "pass": False,
-            "reason": "No 'datetime' column found (expected it as DatetimeIndex or column).",
+            "reason": f"Input parquet not found: {input_path}",
             "metrics": {},
             "checks": {},
             "invalid_examples": [],
         }
+        _write_report(output_path, report)
+        return report
 
-    # Parse robusto (por si vino como string)
-    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+    df = pd.read_parquet(input_path).copy()
 
-    # Si hay datetime inválidos => FAIL (cuenta como NaN en datetime)
+    # -----------------------------
+    # 2) Asegurar columna datetime (con blindaje)
+    # -----------------------------
+    try:
+        df = _ensure_datetime_column(df)
+    except Exception as e:
+        report = {
+            "pass": False,
+            "reason": f"Failed to ensure datetime column: {type(e).__name__}: {e}",
+            "metrics": {},
+            "checks": {"datetime_column_ok": False},
+            "invalid_examples": [],
+        }
+        _write_report(output_path, report)
+        return report
+
+    # Fail temprano: datetimes inválidos (NaT)
     if df["datetime"].isna().any():
         bad_count = int(df["datetime"].isna().sum())
         report = {
@@ -75,10 +193,7 @@ def validate_intraday_quality(
             "checks": {"datetime_parse_ok": False},
             "invalid_examples": [],
         }
-        # Guardar reporte
-        out = Path(output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        _write_report(output_path, report)
         return report
 
     # -----------------------------
@@ -99,28 +214,33 @@ def validate_intraday_quality(
             "checks": {"required_cols_ok": False},
             "invalid_examples": [],
         }
-        out = Path(output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        _write_report(output_path, report)
         return report
 
-    # Orden
-    df = df.sort_values(["date", "datetime"])
+    # -----------------------------
+    # 5) Orden explícito (preserva trazabilidad temporal)
+    # -----------------------------
+    df = df.sort_values(["date", "datetime"]).reset_index(drop=True)
+
+    # Auditoría temporal (logs)
+    _log_temporal_audit(df, label="post_sort")
 
     # -----------------------------
-    # 5) Métricas NaNs
+    # 6) Métricas NaNs
     # -----------------------------
+    # Nota: incluimos todas las columnas actuales del df, incluyendo 'date'
+    # y futuras columnas auxiliares. Si prefiere, puede filtrar solo OHLCV.
     col_nan = {c: _nan_ratio(df[c]) for c in df.columns}
     total_nan_ratio = float(df.isna().mean().mean())
 
     # -----------------------------
-    # 6) Duplicados por (date, datetime)
+    # 7) Duplicados por (date, datetime)
     # -----------------------------
     dup_mask = df.duplicated(subset=["date", "datetime"], keep=False)
     dup_count = int(dup_mask.sum())
 
     # -----------------------------
-    # 7) Días incompletos
+    # 8) Días incompletos (por conteo de registros/día)
     # -----------------------------
     counts_per_day = df.groupby("date")["datetime"].count()
     days_total = int(counts_per_day.shape[0])
@@ -130,12 +250,12 @@ def validate_intraday_quality(
     incomplete_days_ratio = float(incomplete_days_count / days_total) if days_total else 1.0
 
     # -----------------------------
-    # 8) Gaps intradía
+    # 9) Gaps intradía
     #    diff entre timestamps consecutivos dentro del mismo día (segundos)
     # -----------------------------
     df["ts_diff_sec"] = df.groupby("date")["datetime"].diff().dt.total_seconds()
 
-    # gaps mayores a 1 minuto (expected_freq_seconds) para medir max encontrado
+    # gaps mayores a expected_freq_seconds para estimar el máximo encontrado
     gap_mask = df["ts_diff_sec"] > expected_freq_seconds
 
     # gaps mayores al máximo permitido => FAIL si hay alguno
@@ -144,7 +264,7 @@ def validate_intraday_quality(
     max_gap_found = float(df.loc[gap_mask, "ts_diff_sec"].max()) if gap_mask.any() else 0.0
 
     # -----------------------------
-    # 9) Valores inválidos OHLCV
+    # 10) Valores inválidos OHLCV
     # -----------------------------
     invalid_mask = (
         (df["high"] < df["low"]) |
@@ -154,13 +274,16 @@ def validate_intraday_quality(
     )
     invalid_count = int(invalid_mask.sum())
 
-    invalid_examples = []
+    invalid_examples: List[Dict[str, Any]] = []
     if invalid_count > 0:
-        sample = df.loc[invalid_mask, ["date", "datetime", "open", "high", "low", "close", "volume"]].head(20)
+        sample = df.loc[
+            invalid_mask,
+            ["date", "datetime", "open", "high", "low", "close", "volume"]
+        ].head(20)
         invalid_examples = sample.astype(str).to_dict(orient="records")
 
     # -----------------------------
-    # 10) Checks + PASS/FAIL
+    # 11) Checks + PASS/FAIL
     # -----------------------------
     checks = {
         "datetime_parse_ok": True,
@@ -174,7 +297,7 @@ def validate_intraday_quality(
     }
     passed = all(checks.values())
 
-    report = {
+    report: Dict[str, Any] = {
         "pass": bool(passed),
         "reason": None if passed else "Quality checks failed (see checks/metrics).",
         "metrics": {
@@ -193,22 +316,21 @@ def validate_intraday_quality(
     }
 
     # -----------------------------
-    # 11) Guardar JSON
+    # 12) Guardar JSON
     # -----------------------------
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    _write_report(output_path, report)
 
     return report
 
 
+# ------------------------------------------------------------
+# CLI entrypoint
+# ------------------------------------------------------------
 def main() -> None:
-    import argparse
-
     log.info("[0] Parseando argumentos (CLI)")
     p = argparse.ArgumentParser()
-    p.add_argument("--input", required=True)
-    p.add_argument("--output", required=True)
+    p.add_argument("--input", required=True, help="Input parquet (ej: data/processed/mnq_intraday.parquet)")
+    p.add_argument("--output", required=True, help="Output report json (ej: reports/data_validation.json)")
 
     p.add_argument("--expected_freq_seconds", type=int, default=60)
     p.add_argument("--expected_minutes_per_day", type=int, default=451)
@@ -275,7 +397,7 @@ def main() -> None:
             "checks": {},
             "invalid_examples": [],
         }
-        out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        _write_report(args.output, report)
         log.info("[4] Report escrito pese a excepción: %s", out)
 
     # Quality gate real: FAIL => exit code 1

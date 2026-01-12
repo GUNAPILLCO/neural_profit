@@ -452,6 +452,54 @@ def main() -> None:
     total_nans = int(mnq_intraday_clean.isna().sum().sum())
     log.info("[6.1] NaNs total: %s", total_nans)
 
+
+    # -----------------------------------------------------------------
+    # Checks de integridad temporal 
+    # -----------------------------------------------------------------
+    def log_time_index_health(df: pd.DataFrame, label: str) -> None:
+        is_dtindex = isinstance(df.index, pd.DatetimeIndex)
+        is_monotonic = bool(df.index.is_monotonic_increasing) if is_dtindex else False
+        n_duplicates = int(df.index.duplicated().sum()) if is_dtindex else -1
+        tzinfo = str(df.index.tz) if (is_dtindex and df.index.tz is not None) else "None"
+
+        log.info(f"[CHECK:{label}] DatetimeIndex: {is_dtindex}")
+        log.info(f"[CHECK:{label}] TZ: {tzinfo}")
+        log.info(f"[CHECK:{label}] Monotonic increasing: {is_monotonic}")
+        log.info(f"[CHECK:{label}] Duplicated timestamps: {n_duplicates}")
+
+        if not is_dtindex:
+            log.warning(f"[WARN:{label}] El índice NO es DatetimeIndex.")
+        if is_dtindex and not is_monotonic:
+            log.warning(f"[WARN:{label}] El índice temporal NO es monótono creciente.")
+        if is_dtindex and n_duplicates > 0:
+            log.warning(f"[WARN:{label}] Hay {n_duplicates} timestamps duplicados.")
+
+    # Salud del índice (pre/post limpieza)
+    log_time_index_health(mnq_intraday, "pre_clean")
+    log_time_index_health(mnq_intraday_clean, "post_clean")
+
+    # Chequeo adicional: continuidad intradiaria por día (gap exacto)
+    expected = pd.Timedelta(minutes=args.gap_minutes)
+
+    # Conteo de días donde aparece algún gap != expected (excluye 1er diff del día)
+    gaps_by_day = (
+        mnq_intraday_clean.index.to_series()
+        .groupby(mnq_intraday_clean.index.date)
+        .apply(lambda s: (s.diff().iloc[1:] != expected).any())
+    )
+
+    n_days_with_gaps = int(gaps_by_day.sum()) if len(gaps_by_day) else 0
+    log.info(f"[CHECK:post_clean] Days with intraday gaps (!={expected}): {n_days_with_gaps}")
+
+    if n_days_with_gaps > 0:
+        # Loguea solo algunas fechas para no explotar la consola
+        sample_dates = gaps_by_day[gaps_by_day].index[:10]
+        log.warning(f"[WARN:post_clean] Ejemplos de días con gaps: {list(sample_dates)}")
+
+    # -----------------------------------------------------------------
+    # Fin de Checks de integridad temporal 
+    # -----------------------------------------------------------------
+
     log.info("[7] Calculando horario efectivo presente en dataset final")
     start_time, end_time = get_trading_time_range(mnq_intraday_clean)
     trading_hours_label = f"{args.trading_start}-{args.trading_end} {args.timezone_to}"

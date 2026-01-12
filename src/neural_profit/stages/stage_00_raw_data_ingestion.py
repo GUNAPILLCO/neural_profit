@@ -197,6 +197,27 @@ def main() -> None:
     # Asegurar que exista data/raw/
     OUT_PARQUET.parent.mkdir(parents=True, exist_ok=True)
     
+    # -----------------------------------------------------------------
+    # Checks de integridad temporal (NO modifican datos)
+    # -----------------------------------------------------------------
+    is_monotonic = df_mnq_raw.index.is_monotonic_increasing
+    n_duplicates = int(df_mnq_raw.index.duplicated().sum())
+
+    log.info(f"[CHECK] Index monotonic increasing: {is_monotonic}")
+    log.info(f"[CHECK] Duplicated timestamps: {n_duplicates}")
+
+    if not is_monotonic:
+        log.warning(
+            "[WARN] El índice temporal NO es monótono creciente. "
+            "Revisar orden o solapes entre archivos."
+        )
+
+    if n_duplicates > 0:
+        log.warning(
+            f"[WARN] Se detectaron {n_duplicates} timestamps duplicados "
+            "en el índice temporal."
+        )  
+
     log.info(f"[3] Guardando dataset mnq_raw.parquet")
     # Guardar parquet RAW (con índice datetime)
     df_mnq_raw.to_parquet(OUT_PARQUET, index=True)
