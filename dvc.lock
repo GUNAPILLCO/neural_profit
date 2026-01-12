@@ -102,3 +102,19 @@ stages:
       hash: md5
       md5: 9a8be49b3b7a578d14668b68217a8c77
       size: 5212
+  stage_03a_target_investigation:
+    cmd: "python -u src/neural_profit/stages/stage_03a_target_investigation.py\n"
+    deps:
+    - path: data/processed/mnq_intraday.parquet
+      hash: md5
+      md5: d228bdc8e0fd4298bed3102849f8854e
+      size: 13780160
+    - path: src/neural_profit/stages/stage_03a_target_investigation.py
+      hash: md5
+      md5: 595cb2b375fe9ff13d1918cf248d4d59
+      size: 22732
+    outs:
+    - path: reports/target_investigation_summary.json
+      hash: md5
+      md5: 32fbad0e13d1e0acdc8b1a358391bb01
+      size: 1877

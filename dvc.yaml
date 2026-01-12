@@ -9,13 +9,13 @@ stages:
   stage_00_raw_data_ingestion:
     cmd: python src/neural_profit/stages/stage_00_raw_data_ingestion.py
     deps:
-      - src/neural_profit/stages/stage_00_raw_data_ingestion.py
-      - data/source
+    - src/neural_profit/stages/stage_00_raw_data_ingestion.py
+    - data/source
     outs:
-      - data/raw/mnq_raw.parquet
+    - data/raw/mnq_raw.parquet
     metrics:
-      - reports/ingest_summary.json:
-          cache: false   # Métrica liviana, se guarda en Git
+    - reports/ingest_summary.json:
+        cache: false     # Métrica liviana, se guarda en Git
 
 
   # ------------------------------------------------------------
@@ -34,17 +34,17 @@ stages:
       --out-summary reports/dataset_prep_summary.json
     deps:
       # Script del stage
-      - src/neural_profit/stages/stage_01_intraday_data_preparation.py
+    - src/neural_profit/stages/stage_01_intraday_data_preparation.py
 
       # Output del stage_00 (input de este stage)
-      - data/raw/mnq_raw.parquet
+    - data/raw/mnq_raw.parquet
     outs:
       # Dataset procesado (artefacto pesado → DVC)
-      - data/processed/mnq_intraday.parquet
+    - data/processed/mnq_intraday.parquet
     metrics:
       # Summary liviano de preparación del dataset
-      - reports/dataset_prep_summary.json:
-          cache: false
+    - reports/dataset_prep_summary.json:
+        cache: false
 
 
   # ------------------------------------------------------------
@@ -86,46 +86,34 @@ stages:
       --max_col_nan_ratio ${data_quality.max_col_nan_ratio}
 
     deps:
-      - src/neural_profit/stages/stage_02_data_quality_validation.py
-      - data/processed/mnq_intraday.parquet              
+    - src/neural_profit/stages/stage_02_data_quality_validation.py
+    - data/processed/mnq_intraday.parquet
 
     outs:
-      - reports/data_validation.json:
-          persist: true
+    - reports/data_validation.json:
+        persist: true
 
     params:
-      - data_quality
+    - data_quality
 
-      # ------------------------------------------------------------
-  # Stage 03 – Target definition (trade/hold) 60/90
   # ------------------------------------------------------------
-  # - Genera mnq_intraday_labeled.parquet con:
-  #   delta_pts_{h}, trade_{h}, hold_{h}
-  # - Genera summary liviano en JSON (métrica)
-  stage_03_target_definition:
+  # Stage 03a – Target investigation (empirical analysis)
+  # ------------------------------------------------------------
+  # - Analiza movimientos intradía por minuto
+  # - Define deltas base / target / tail
+  # - Define ventanas óptimas y stop empírico
+  # - Genera artifact JSON (no modifica dataset)
+  stage_03a_target_investigation:
     cmd: >
-      python src/neural_profit/stages/stage_03_target_definition.py
-      --input-path data/processed/mnq_intraday.parquet
-      --output-labeled-path data/processed/mnq_intraday_labeled.parquet
-      --summary-path reports/target_definition_summary.json
-      --date-col date
-      --close-col close
-      --horizons 60 90
-      --base-pts ${target_definition.base_pts}
-      --ext-pts ${target_definition.ext_pts}
+      python -u src/neural_profit/stages/stage_03a_target_investigation.py
 
     deps:
-      - src/neural_profit/stages/stage_03_target_definition.py
+      - src/neural_profit/stages/stage_03a_target_investigation.py
       - data/processed/mnq_intraday.parquet
 
-    outs:
-      - data/processed/mnq_intraday_labeled.parquet
+    #outs:
+    #  - reports/target_investigation_summary.json
 
     metrics:
-      - reports/target_definition_summary.json:
+      - reports/target_investigation_summary.json:
           cache: false
-
-    params:
-      - target_definition.horizons
-      - target_definition.base_pts
-      - target_definition.ext_pts
