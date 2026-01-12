@@ -10,8 +10,8 @@ stages:
       nfiles: 22
     - path: src/neural_profit/stages/stage_00_raw_data_ingestion.py
       hash: md5
-      md5: 1401cbea1471d2cb7e9476105ac37f5f
-      size: 6745
+      md5: 1c54a76d6c0a891fa7d41ca6b45379fe
+      size: 7284
     outs:
     - path: data/raw/mnq_raw.parquet
       hash: md5
@@ -32,8 +32,8 @@ stages:
       size: 33576640
     - path: src/neural_profit/stages/stage_01_intraday_data_preparation.py
       hash: md5
-      md5: d5164f5fe2eecddc8b55709c8d8837ec
-      size: 18740
+      md5: a954a957840d7329c7ff1cb79bb81066
+      size: 19262
     outs:
     - path: data/processed/mnq_intraday.parquet
       hash: md5
@@ -55,8 +55,8 @@ stages:
       size: 13780160
     - path: src/neural_profit/stages/stage_02_data_quality_validation.py
       hash: md5
-      md5: 24d09230b72bc611a1e70828b642d284
-      size: 9297
+      md5: b29e5008beaab2537057f54fd4fc8aca
+      size: 10574
     params:
       params.yaml:
         data_quality:
@@ -111,10 +111,34 @@ stages:
       size: 13780160
     - path: src/neural_profit/stages/stage_03a_target_investigation.py
       hash: md5
-      md5: 595cb2b375fe9ff13d1918cf248d4d59
-      size: 22732
+      md5: 731683159d7436770008374a2b1cb557
+      size: 23345
     outs:
     - path: reports/target_investigation_summary.json
       hash: md5
-      md5: 32fbad0e13d1e0acdc8b1a358391bb01
-      size: 1877
+      md5: 293c202259f0e738c5f406a3d673e736
+      size: 877
+  stage_03b_target_definition:
+    cmd: "python -u src/neural_profit/stages/stage_03b_target_definition.py\n"
+    deps:
+    - path: data/processed/mnq_intraday.parquet
+      hash: md5
+      md5: d228bdc8e0fd4298bed3102849f8854e
+      size: 13780160
+    - path: reports/target_investigation_summary.json
+      hash: md5
+      md5: 293c202259f0e738c5f406a3d673e736
+      size: 877
+    - path: src/neural_profit/stages/stage_03b_target_definition.py
+      hash: md5
+      md5: 068ea5208480a5bcfec6c80e61f1d285
+      size: 13818
+    outs:
+    - path: data/processed/mnq_intraday_labeled.parquet
+      hash: md5
+      md5: 831120b119303db1afd5084575cfe6df
+      size: 13875267
+    - path: reports/target_definition_summary.json
+      hash: md5
+      md5: 6d7282f3db01edf86493e874eb5520ff
+      size: 494

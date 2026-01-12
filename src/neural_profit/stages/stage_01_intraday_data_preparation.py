@@ -25,6 +25,15 @@ from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 
+import logging
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+log = logging.getLogger("stage_01")
+
+
 # Import del calendario de mercado.
 # Si no está instalado, se falla temprano con un mensaje claro.
 try:
@@ -404,52 +413,51 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    # 0) Leer argumentos CLI/env
+    log.info("[0] Parseando argumentos (CLI/env)")
     args = parse_args()
 
     raw_path = Path(args.raw_path)
     out_parquet = Path(args.out_parquet)
     out_summary = Path(args.out_summary)
 
-    # 1) Load raw:
-    #    - leer parquet
-    #    - asegurar DatetimeIndex
+    log.info("[1] Cargando raw parquet y asegurando DatetimeIndex")
     mnq_raw = load_raw_dataset(raw_path)
 
-    # Métrica base: total de días distintos en el raw
+    log.info("[1.1] Contando días totales en raw")
     total_days_raw = count_total_days(mnq_raw)
 
-    # 2) Normalizar timezone:
-    #    - si el índice venía naive, asumimos from_tz
-    #    - convertimos a tz del mercado para filtrar horario correctamente
+    log.info("[2] Normalizando timezone: from=%s -> to=%s", args.timezone_from, args.timezone_to)
     mnq_raw_tz = configure_timezone(mnq_raw, from_tz=args.timezone_from, to_tz=args.timezone_to)
 
-    # 3) Filtrar días hábiles + horario de trading
+    log.info("[3] Filtrando días hábiles NASDAQ y horario de trading (%s-%s)", args.trading_start, args.trading_end)
     mnq_trading_days = filter_nasdaq_trading_days(mnq_raw_tz)
     mnq_intraday = filter_nasdaq_trading_hours(mnq_trading_days, args.trading_start, args.trading_end)
 
-    # 4) Estadísticas por día (antes de limpiar días incompletos)
+    log.info("[4] Analizando conteo de registros por día (pre-limpieza)")
     daily_counts, full_day_record_count = analyze_daily_record_counts(mnq_intraday)
+    log.info("[4.1] Registros por día (moda día completo): %s", full_day_record_count)
 
-    # 5) Eliminar días incompletos o con gaps irregulares
-    #    Se usa como referencia expected_records el "día completo" (moda).
+    log.info("[5] Removiendo días incompletos / gaps (gap_minutes=%s)", args.gap_minutes)
     mnq_intraday_clean = remove_incomplete_trading_days(
         mnq_intraday,
         expected_records=full_day_record_count,
         gap_minutes=args.gap_minutes,
     )
 
-    # Recalcular stats luego de la limpieza (esto define el output final)
+    log.info("[5.1] Re-analizando conteo de registros por día (post-limpieza)")
     daily_counts_clean, full_day_record_count_clean = analyze_daily_record_counts(mnq_intraday_clean)
+    log.info("[5.2] Registros por día (moda día completo, limpio): %s", full_day_record_count_clean)
 
-    # 6) NaNs totales del dataset final (control mínimo de calidad)
+    log.info("[6] Calculando NaNs totales del dataset final")
     total_nans = int(mnq_intraday_clean.isna().sum().sum())
+    log.info("[6.1] NaNs total: %s", total_nans)
 
-    # 7) Horario efectivo presente en el dataset final (evidencia)
+    log.info("[7] Calculando horario efectivo presente en dataset final")
     start_time, end_time = get_trading_time_range(mnq_intraday_clean)
     trading_hours_label = f"{args.trading_start}-{args.trading_end} {args.timezone_to}"
+    log.info("[7.1] Time range efectivo: %s -> %s (%s)", start_time, end_time, trading_hours_label)
 
-    # 8) Construir y guardar summary JSON
+    log.info("[8] Construyendo y guardando summary JSON: %s", out_summary)
     trading_days_output = int(daily_counts_clean.shape[0])
     summary = build_dataset_prep_summary(
         total_days_raw=total_days_raw,
@@ -464,28 +472,27 @@ def main() -> None:
     )
     save_json(summary, out_summary)
 
-    # 9) Guardar parquet procesado (artefacto DVC)
+    log.info("[9] Guardando parquet procesado: %s", out_parquet)
     out_parquet.parent.mkdir(parents=True, exist_ok=True)
     mnq_intraday_clean.to_parquet(out_parquet, index=True)
 
-    # 10) Logging opcional a MLflow (tiene que ejecutarse dentro de un run externo o autolog)
+    log.info("[10] Logging opcional a MLflow (enable=%s)", args.enable_mlflow)
     log_mlflow(summary, out_summary, enable=args.enable_mlflow)
 
-    # Log final breve para consola (útil para logs de DVC/GitHub Actions)
-    print("Stage_01 completed.")
-    print(f"Input days (raw): {total_days_raw}")
-    print(f"Output trading days: {trading_days_output}")
-    print(f"Discarded days (%): {summary['quality_checks']['discarded_days_pct']}")
-    print(
-        f"Records/day (min/median/max): "
-        f"{summary['records_per_day']['min']}/"
-        f"{summary['records_per_day']['median']}/"
-        f"{summary['records_per_day']['max']}"
+    # Resumen final (sin prints)
+    log.info("[OK] Stage_01 completed")
+    log.info("Input days (raw): %s", total_days_raw)
+    log.info("Output trading days: %s", trading_days_output)
+    log.info("Discarded days (%%): %s", summary["quality_checks"]["discarded_days_pct"])
+    log.info(
+        "Records/day (min/median/max): %s/%s/%s",
+        summary["records_per_day"]["min"],
+        summary["records_per_day"]["median"],
+        summary["records_per_day"]["max"],
     )
-    print(f"NaNs total: {total_nans}")
-    print(f"Output parquet: {out_parquet}")
-    print(f"Summary JSON: {out_summary}")
-
+    log.info("NaNs total: %s", total_nans)
+    log.info("Output parquet: %s", out_parquet)
+    log.info("Summary JSON: %s", out_summary)
 
 if __name__ == "__main__":
     # Entry point estándar: permite ejecutar el script por CLI o desde DVC.

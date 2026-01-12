@@ -117,3 +117,26 @@ stages:
     metrics:
       - reports/target_investigation_summary.json:
           cache: false
+
+  # ------------------------------------------------------------
+  # Stage 03b – Target definition (empirical analysis)
+  # ------------------------------------------------------------
+  # - Analiza movimientos intradía por minuto
+  # - Define deltas base / target / tail
+  # - Define ventanas óptimas y stop empírico
+  # - Genera artifact JSON (no modifica dataset)
+  stage_03b_target_definition:
+    cmd: >
+      python -u src/neural_profit/stages/stage_03b_target_definition.py
+
+    deps:
+      - src/neural_profit/stages/stage_03b_target_definition.py
+      - data/processed/mnq_intraday.parquet
+      - reports/target_investigation_summary.json
+    outs:
+      - data/processed/mnq_intraday_labeled.parquet
+    #  - reports/target_definition_summary.json
+
+    metrics:
+      - reports/target_definition_summary.json:
+          cache: false

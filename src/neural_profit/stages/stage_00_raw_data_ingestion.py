@@ -29,6 +29,14 @@ from pathlib import Path            # manejo robusto de rutas
 import pandas as pd                 # procesamiento de datos
 
 
+import logging
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+log = logging.getLogger("stage_00")
+
 # ---------------------------------------------------------------------
 # Configuración de rutas (DVC-friendly)
 # ---------------------------------------------------------------------
@@ -88,6 +96,7 @@ def generar_df(source_dir: Path) -> pd.DataFrame:
     dfs: list[pd.DataFrame] = []
 
     # Loop archivo por archivo (idéntico a su notebook)
+    
     for archivo in files:
 
         # Leer el .txt crudo
@@ -166,24 +175,33 @@ def main() -> None:
     """
 
     # Verificación temprana: ¿hay archivos fuente?
+    log.info(f"[1] Leyendo archivos .txt")
+    
     files = sorted(SOURCE_DIR.glob("*.txt"))
     if not files:
         raise SystemExit(
             f"ERROR: '{SOURCE_DIR}' está vacío. "
             "Copie los .txt allí y reintente."
         )
-
+    
+    log.info(f"[OK] Archivos .txt encontrados")
     # Construcción del dataset raw
     # Nota: en DVC normalmente se reconstruye siempre;
     # el control de cambios lo hace DVC con deps/outs.
+    
+    log.info(f"[2] Construyendo dataset mnq_raw.parquet")
     df_mnq_raw = generar_df(SOURCE_DIR)
+    
+    log.info(f"[OK] Dataset construido correctamente")
 
     # Asegurar que exista data/raw/
     OUT_PARQUET.parent.mkdir(parents=True, exist_ok=True)
-
+    
+    log.info(f"[3] Guardando dataset mnq_raw.parquet")
     # Guardar parquet RAW (con índice datetime)
     df_mnq_raw.to_parquet(OUT_PARQUET, index=True)
 
+    log.info(f"[4] Generando ingest_summary.json")
     # Generar artefacto de resumen
     summary = write_ingest_summary(
         df_mnq_raw,
@@ -191,10 +209,8 @@ def main() -> None:
     )
 
     # Logs simples (útiles en consola / CI)
-    print("OK:", OUT_PARQUET)
-    print("OK:", OUT_SUMMARY)
-    print("Summary:", summary)
-
+    log.info(f"[OK] Raw parquet: {OUT_PARQUET}")
+    log.info(f"[OK] Summary JSON: {OUT_SUMMARY}")
 
 # ---------------------------------------------------------------------
 # Boilerplate Python estándar

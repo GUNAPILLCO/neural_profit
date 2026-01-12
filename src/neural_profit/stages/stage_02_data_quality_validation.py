@@ -4,6 +4,15 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import os
+import logging 
+
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+log = logging.getLogger("stage_02")
 
 try:
     import mlflow
@@ -193,9 +202,10 @@ def validate_intraday_quality(
     return report
 
 
-def main():
+def main() -> None:
     import argparse
 
+    log.info("[0] Parseando argumentos (CLI)")
     p = argparse.ArgumentParser()
     p.add_argument("--input", required=True)
     p.add_argument("--output", required=True)
@@ -209,9 +219,21 @@ def main():
 
     args = p.parse_args()
 
-    # Siempre intentamos generar JSON, incluso ante excepciones
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
+    log.info("[0.1] Output report path: %s", out)
+
+    log.info("[1] Ejecutando validación de calidad (quality gate)")
+    log.info(
+        "[1.1] Params: freq=%ss, minutes/day=%s, max_incomplete_ratio=%.4f, max_gap=%ss, "
+        "max_total_nan=%.6f, max_col_nan=%.6f",
+        args.expected_freq_seconds,
+        args.expected_minutes_per_day,
+        args.max_incomplete_days_ratio,
+        args.max_gap_seconds,
+        args.max_total_nan_ratio,
+        args.max_col_nan_ratio,
+    )
 
     try:
         report = validate_intraday_quality(
@@ -225,17 +247,27 @@ def main():
             max_col_nan_ratio=args.max_col_nan_ratio,
         )
 
+        passed = bool(report.get("pass"))
+        reason = report.get("reason", "")
+        log.info("[2] Validación finalizada: pass=%s", passed)
+        if reason:
+            log.info("[2.1] Reason: %s", reason)
+
         # MLflow logging (opcional)
         if mlflow is not None:
+            log.info("[3] MLflow disponible: logueando métricas/tags")
             with mlflow.start_run(run_name="stage_02_data_quality_validation"):
                 for k, v in report.get("metrics", {}).items():
                     if isinstance(v, (int, float)) and np.isfinite(v):
                         mlflow.log_metric(k, float(v))
-                mlflow.set_tag("quality_pass", str(report.get("pass")))
+                mlflow.set_tag("quality_pass", str(passed))
                 for ck, ok in report.get("checks", {}).items():
                     mlflow.set_tag(f"check__{ck}", str(ok))
+        else:
+            log.info("[3] MLflow no disponible: omitido")
 
     except Exception as e:
+        log.exception("[ERR] Excepción durante validate_intraday_quality")
         report = {
             "pass": False,
             "reason": f"Exception: {type(e).__name__}: {e}",
@@ -244,9 +276,12 @@ def main():
             "invalid_examples": [],
         }
         out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        log.info("[4] Report escrito pese a excepción: %s", out)
 
     # Quality gate real: FAIL => exit code 1
-    sys.exit(0 if report.get("pass") else 1)
+    passed = bool(report.get("pass"))
+    log.info("[5] Exit code = %s", 0 if passed else 1)
+    sys.exit(0 if passed else 1)
 
 
 if __name__ == "__main__":
