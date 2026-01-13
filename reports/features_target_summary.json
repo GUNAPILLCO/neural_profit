@@ -1,0 +1,51 @@
+{
+  "stage": "stage_04_feature_engineering",
+  "description": "Construcción y consolidación de features intradía (OHLC + indicadores técnicos) y targets delta_pts_h.",
+  "io": {
+    "in_parquet": "data\\processed\\mnq_intraday_labeled.parquet",
+    "out_parquet": "data\\features\\mnq_features_target.parquet",
+    "out_summary": "reports\\features_target_summary.json"
+  },
+  "schema": {
+    "date_col": "date",
+    "features": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "price_ema60",
+      "momentum_10",
+      "roc_30",
+      "roc_60"
+    ],
+    "targets": [
+      "delta_pts_60",
+      "delta_pts_90"
+    ],
+    "n_features": 8,
+    "n_targets": 2
+  },
+  "data_stats": {
+    "n_rows_in": 626743,
+    "n_rows_out": 548563,
+    "rows_dropped": 78180,
+    "rows_dropped_ratio": 0.12474,
+    "n_days_in": 1303,
+    "n_days_out": 1303,
+    "rows_per_day_mean_in": 481.0,
+    "rows_per_day_mean_out": 421.0
+  },
+  "nan_ratio_by_col": {
+    "date": 0.0,
+    "open": 0.0,
+    "high": 0.0,
+    "low": 0.0,
+    "close": 0.0,
+    "price_ema60": 0.0,
+    "momentum_10": 0.0,
+    "roc_30": 0.0,
+    "roc_60": 0.0,
+    "delta_pts_60": 0.0,
+    "delta_pts_90": 0.0
+  }
+}

@@ -106,27 +106,33 @@ def compute_selected_indicators_per_day(
     if missing:
         raise ValueError(f"Faltan columnas requeridas en df: {missing}")
 
+    log.info("[2.1] Calculando 'price_ema60'")
+    log.info("[2.2] Calculando 'momentum_10'")
+    log.info("[2.3] Calculando 'roc_30'")
+    log.info("[2.4] Calculando 'roc_60'")
+
     def apply_per_day(day_df: pd.DataFrame) -> pd.DataFrame:
         day_df = day_df.copy()
 
         # EMA-based price extension (normalized)
-        log.info(f"[2.1] Calculando 'price_ema60'")
         day_df["price_ema60"] = day_df[target_col] / day_df[target_col].ewm(span=60).mean() - 1
 
         # Momentum (percentage change)
-        (f"[2.2] Calculando 'momentum_10'")
         day_df["momentum_10"] = day_df[target_col].pct_change(10)
 
         # ROC 30 / 60
-        (f"[2.3] Calculando 'roc_30'")
         day_df["roc_30"] = ROCIndicator(close=day_df[target_col], window=30).roc()
-        
-        (f"[2.4] Calculando 'roc_60'")
         day_df["roc_60"] = ROCIndicator(close=day_df[target_col], window=60).roc()
 
         return day_df
 
-    df_out = df.groupby(date_col, group_keys=False).apply(apply_per_day)
+    df_out = (df.
+              groupby(date_col, group_keys=False)
+              .apply(apply_per_day, include_groups=False))
+    
+    # Reponer 'date' explícitamente (robusto ante cambios de pandas)
+    df_out["date"] = pd.to_datetime(df_out.index).date
+    
     return df_out, indicator_columns
 
 

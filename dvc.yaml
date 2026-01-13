@@ -140,3 +140,20 @@ stages:
     metrics:
       - reports/target_definition_summary.json:
           cache: false
+
+
+  stage_04_feature_engineering:
+    desc: >
+      Construye y consolida el conjunto final de features intradía para MNQ.
+      Incluye variables OHLC, cálculo de indicadores técnicos por jornada
+      (sin data leakage), limpieza de NaNs y generación del dataset final
+      listo para entrenamiento de modelos predictivos.
+    cmd: python src/neural_profit/stages/stage_04_feature_engineering.py
+    deps:
+      - src/neural_profit/stages/stage_04_feature_engineering.py
+      - data/processed/mnq_intraday_labeled.parquet
+    outs:
+      - data/features/mnq_features_target.parquet
+    metrics:
+      - reports/features_target_summary.json:
+          cache: false
