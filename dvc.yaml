@@ -157,3 +157,27 @@ stages:
     metrics:
       - reports/features_target_summary.json:
           cache: false
+
+  
+  
+  stage_05_time_aware_data_splitting:
+    cmd: >
+      python src/neural_profit/stages/stage_05_time_aware_data_splitting.py
+    deps:
+      - src/neural_profit/stages/stage_05_time_aware_data_splitting.py
+      - data/features/mnq_features_target.parquet
+      - reports/features_target_summary.json
+    params:
+      - stage_05.train_ratio
+      - stage_05.valid_ratio
+      - stage_05.expected_gap_minutes
+    outs:
+      - data/splits/mnq_train.parquet
+      - data/splits/mnq_valid.parquet
+      - data/splits/mnq_test.parquet
+      - data/splits/splits.json
+    metrics:
+      - reports/splits_summary.json:
+          cache: false
+
+

@@ -151,14 +151,55 @@ stages:
       size: 13875267
     - path: src/neural_profit/stages/stage_04_feature_engineering.py
       hash: md5
-      md5: 2f4634dd7b6c79344bc3cab501bfa5f0
-      size: 13866
+      md5: 4b0a4d88078bb522510a6887f3647012
+      size: 13865
     outs:
     - path: data/features/mnq_features_target.parquet
       hash: md5
-      md5: f4516de9b993e5cd5b4fc434f3342076
-      size: 25675550
+      md5: ce362c35fbcd9c97d3194253e861079f
+      size: 29812335
     - path: reports/features_target_summary.json
       hash: md5
       md5: ca9fae7ba6b63f16e86528a371f19866
       size: 1235
+  stage_05_time_aware_data_splitting:
+    cmd: "python src/neural_profit/stages/stage_05_time_aware_data_splitting.py\n"
+    deps:
+    - path: data/features/mnq_features_target.parquet
+      hash: md5
+      md5: ce362c35fbcd9c97d3194253e861079f
+      size: 29812335
+    - path: reports/features_target_summary.json
+      hash: md5
+      md5: ca9fae7ba6b63f16e86528a371f19866
+      size: 1235
+    - path: src/neural_profit/stages/stage_05_time_aware_data_splitting.py
+      hash: md5
+      md5: cfd470cd4cf440fe0628a0f6166aa106
+      size: 19316
+    params:
+      params.yaml:
+        stage_05.expected_gap_minutes: 1
+        stage_05.train_ratio: 0.7
+        stage_05.valid_ratio: 0.15
+    outs:
+    - path: data/splits/mnq_test.parquet
+      hash: md5
+      md5: b9008f6a2e10aeca3a553f726e117261
+      size: 5248817
+    - path: data/splits/mnq_train.parquet
+      hash: md5
+      md5: 5be90ca678e1b727ae538395fd1708be
+      size: 21206133
+    - path: data/splits/mnq_valid.parquet
+      hash: md5
+      md5: 7ba7dac5654c982a2b94e897b23df7d7
+      size: 5244671
+    - path: data/splits/splits.json
+      hash: md5
+      md5: d4d3ec3861dbbee49965eaf102ee9272
+      size: 24902
+    - path: reports/splits_summary.json
+      hash: md5
+      md5: fd4d05befe045e37a61f2d08095070f6
+      size: 2700
