@@ -340,7 +340,7 @@ def main() -> None:
     # 5) Guardar parquet
     log.info(f"[5] Guardando parquet final: {OUT_PARQUET}")
     _ensure_parent_dir(OUT_PARQUET)
-    df_out.to_parquet(OUT_PARQUET, index=False)
+    df_out.to_parquet(OUT_PARQUET, index=True)
 
     # 6) Summary JSON
     log.info(f"[6] Generando summary: {OUT_SUMMARY}")
