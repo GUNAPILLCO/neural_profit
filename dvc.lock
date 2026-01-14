@@ -175,8 +175,8 @@ stages:
       size: 1235
     - path: src/neural_profit/stages/stage_05_time_aware_data_splitting.py
       hash: md5
-      md5: cfd470cd4cf440fe0628a0f6166aa106
-      size: 19316
+      md5: 0b90450db0fb102199dbb73e3ad7af0b
+      size: 19306
     params:
       params.yaml:
         stage_05.expected_gap_minutes: 1
