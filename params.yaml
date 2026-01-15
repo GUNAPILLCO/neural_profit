@@ -16,3 +16,7 @@ stage_05:
   train_ratio: 0.70
   valid_ratio: 0.15
   expected_gap_minutes: 1
+
+stage_06:
+  gestation_window_start: '08:21'
+  gestation_window_end: '08:49'
