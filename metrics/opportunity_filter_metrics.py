@@ -1,3 +1,5 @@
+import numpy as np
+
 def compute_opportunity_filter_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
