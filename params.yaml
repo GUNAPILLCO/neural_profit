@@ -18,5 +18,6 @@ stage_05:
   expected_gap_minutes: 1
 
 stage_06:
-  gestation_window_start: '08:21'
-  gestation_window_end: '08:49'
+  gestation_window:
+    start: "08:20"
+    end: "08:49"

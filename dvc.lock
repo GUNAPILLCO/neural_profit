@@ -5,22 +5,22 @@ stages:
     deps:
     - path: data/source
       hash: md5
-      md5: 918f120b04627d59b0d27aea55ec6049.dir
+      md5: cec064d8ba304dd490a8c1a2767f2511.dir
       size: 99896000
       nfiles: 22
     - path: src/neural_profit/stages/stage_00_raw_data_ingestion.py
       hash: md5
-      md5: 2d08a45d424788745fb92cad4387c689
-      size: 8110
+      md5: 65771fd66fbf88c1a4698d658e47ac9d
+      size: 18692
     outs:
     - path: data/raw/mnq_raw.parquet
       hash: md5
       md5: 7926c5d3729c93ec15fbff34007adcdf
       size: 33576640
-    - path: reports/ingest_summary.json
+    - path: reports/stage_00_ingest_summary.json
       hash: md5
-      md5: 4ba21dbff97ee00e2c8942dad1fa9ca6
-      size: 250
+      md5: eee433ce4f9d4898ebe3e0c24e6a202e
+      size: 7945
   stage_01_intraday_data_preparation:
     cmd: "python src/neural_profit/stages/stage_01_intraday_data_preparation.py --raw-path
       data/raw/mnq_raw.parquet --out-parquet data/processed/mnq_intraday.parquet --out-summary
@@ -203,3 +203,95 @@ stages:
       hash: md5
       md5: fd4d05befe045e37a61f2d08095070f6
       size: 2700
+  stage_06_window_scaling_seq2seq:
+    cmd: python src/neural_profit/stages/stage_06_window_scaling_seq2seq.py
+    deps:
+    - path: data/splits/mnq_test.parquet
+      hash: md5
+      md5: b9008f6a2e10aeca3a553f726e117261
+      size: 5248817
+    - path: data/splits/mnq_train.parquet
+      hash: md5
+      md5: 5be90ca678e1b727ae538395fd1708be
+      size: 21206133
+    - path: data/splits/mnq_valid.parquet
+      hash: md5
+      md5: 7ba7dac5654c982a2b94e897b23df7d7
+      size: 5244671
+    - path: params.yaml
+      hash: md5
+      md5: 0cc4434da3e63cf5e855413143d455f3
+      size: 448
+    - path: reports/features_target_summary.json
+      hash: md5
+      md5: ca9fae7ba6b63f16e86528a371f19866
+      size: 1235
+    - path: src/neural_profit/stages/stage_06_window_scaling_seq2seq.py
+      hash: md5
+      md5: 4c8109bf508a048558400c66a09be1dc
+      size: 30285
+    params:
+      params.yaml:
+        stage_06.gestation_window.end: 08:49
+        stage_06.gestation_window.start: 08:20
+    outs:
+    - path: data/windows/scaled/scaler_60.pkl
+      hash: md5
+      md5: 855e69e0e4f0630c81aab1a8d6379057
+      size: 735
+    - path: data/windows/scaled/scaler_90.pkl
+      hash: md5
+      md5: f9ef158d375a6307c01380f479f8b261
+      size: 735
+    - path: data/windows/scaled/windows_test_60_z.npz
+      hash: md5
+      md5: e08918deaf3c31893f121266ae420de5
+      size: 294074
+    - path: data/windows/scaled/windows_test_90_z.npz
+      hash: md5
+      md5: 5255050240dd43a8539d9bfbf84853ee
+      size: 294634
+    - path: data/windows/scaled/windows_train_60_z.npz
+      hash: md5
+      md5: 977d24607f3a36d23526092a5540de2b
+      size: 1355928
+    - path: data/windows/scaled/windows_train_90_z.npz
+      hash: md5
+      md5: 27a799b18844f756389ef6576b4477b0
+      size: 1357630
+    - path: data/windows/scaled/windows_valid_60_z.npz
+      hash: md5
+      md5: 25368a708d2c94fcb67de2547d5972a0
+      size: 289153
+    - path: data/windows/scaled/windows_valid_90_z.npz
+      hash: md5
+      md5: 7dfa1dff7a4e64efc31dd2decf327276
+      size: 289678
+    - path: data/windows/windows_test_60.npz
+      hash: md5
+      md5: 6361af54d0726d8c8680cd60d1179ab5
+      size: 200913
+    - path: data/windows/windows_test_90.npz
+      hash: md5
+      md5: 7b4a55b0a43bf6d8b201482eb5eb528b
+      size: 201563
+    - path: data/windows/windows_train_60.npz
+      hash: md5
+      md5: 33bf16367e50b6b630673247e86a2dbe
+      size: 915065
+    - path: data/windows/windows_train_90.npz
+      hash: md5
+      md5: 782689c23fddefe7f99a0284ba0293af
+      size: 917243
+    - path: data/windows/windows_valid_60.npz
+      hash: md5
+      md5: ab64b587151fdf5e9a5017e73bcfdea4
+      size: 196900
+    - path: data/windows/windows_valid_90.npz
+      hash: md5
+      md5: 28ae39c8794279ba918a997a5db87856
+      size: 197508
+    - path: reports/window_scaled_summary.json
+      hash: md5
+      md5: 665e7dfee2477a982e80ab05d52dbd14
+      size: 6328
