@@ -1,79 +1,112 @@
-# ============================================================
-# stage_03a_target_investigation.py
-#
-# Objetivo:
-# - Analizar empíricamente movimientos intradía (Δpts) por minuto del día
-# - Derivar deltas operativos (base / p70 / p90) para H=60 y H=90
-# - Estimar Stop Loss empírico (MAE hasta TP=delta_target_p70)
-# - Construir una tabla resumen final con RR y stop recomendado
-#
-# Entradas / salidas (vía env vars):
-#   IN_PARQUET  : data/processed/mnq_intraday.parquet
-#   OUT_SUMMARY : reports/target_investigation_summary.json
-# ============================================================
+"""
+stage_03a_target_investigation
+
+Propósito
+- Analizar movimientos intradía (Δpts) por minuto del día.
+- Derivar deltas operativos (base / target_p70 / tail_p90) para H=60 y H=90.
+- Estimar Stop Loss empírico (MAE hasta TP=delta_target_p70).
+- Producir UN SOLO JSON con envelope estándar + rows legacy dentro.
+
+Inputs (DVC deps)
+- IN_INTRADAY_PARQUET: data/processed/mnq_intraday.parquet
+
+Reports
+- REPORT_SUMMARY: reports/stage_03a_target_investigation_summary.json
+  (envelope estándar, incluye details.summary_rows con la estructura legacy)
+
+Notas
+- No mezcla días: shifts y MAE se calculan por 'date'.
+- No entrena modelos.
+"""
 
 from __future__ import annotations
 
-import os
+# ---------------------------------------------------------------------
+# Imports (stdlib)
+# ---------------------------------------------------------------------
+import argparse
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
+# ---------------------------------------------------------------------
+# Imports (third-party)
+# ---------------------------------------------------------------------
 import numpy as np
 import pandas as pd
-
 from numba import njit
 
-import logging 
+# ---------------------------------------------------------------------
+# Logging (uniforme)
+# ---------------------------------------------------------------------
+import logging
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 log = logging.getLogger("stage_03a")
 
-#MLflow
-try:
-    import mlflow
-except ImportError:
-    mlflow = None
+# ---------------------------------------------------------------------
+# Configuración DVC-friendly (SIEMPRE presente)
+# ---------------------------------------------------------------------
+IN_INTRADAY_PARQUET = Path(os.environ.get("IN_INTRADAY_PARQUET", "data/processed/mnq_intraday.parquet"))
+REPORT_SUMMARY = Path(os.environ.get("REPORT_SUMMARY", "reports/stage_03a_target_investigation_summary.json"))
+
+# ---------------------------------------------------------------------
+# Configuración funcional (parámetros del stage)
+# ---------------------------------------------------------------------
+HORIZONS: Tuple[int, ...] = (60, 90)
+TOP_N = int(os.environ.get("TOP_N", "30"))
+RR_MIN = float(os.environ.get("RR_MIN", "2.0"))
+DECIMALS = int(os.environ.get("DECIMALS", "2"))
+
+# ---------------------------------------------------------------------
+# Utilidades generales
+# ---------------------------------------------------------------------
+def _iso_utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-# ----------------------------
-# IO (paths por env vars)
-# ----------------------------
-IN_PARQUET = Path(os.environ.get("IN_PARQUET", "data/processed/mnq_intraday.parquet"))
-OUT_SUMMARY = Path(os.environ.get("OUT_SUMMARY", "reports/target_investigation_summary.json"))
+def _ensure_parent_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
 
 
-# ============================================================
-# 1) Carga y preprocesamiento base
-# ============================================================
-def load_mnq_parquet(path: Path = IN_PARQUET) -> pd.DataFrame:
-    """Carga el parquet intradía."""
+def _save_json(payload: Any, path: Path) -> None:
+    _ensure_parent_dir(path)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------
+# Core: carga y columnas base
+# ---------------------------------------------------------------------
+def load_mnq_parquet(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"No se encontró el parquet de entrada: {path}")
-    log.info(f"[OK] Archivo encontrado. Cargando: {path}")
-    return pd.read_parquet(path)
+
+    df = pd.read_parquet(path)
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if "datetime" in df.columns:
+            df = df.set_index("datetime")
+        else:
+            raise TypeError("El DataFrame debe tener DatetimeIndex o columna 'datetime'.")
+
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+    return df
 
 
 def add_column_date(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Asegura índice datetime y crea columna 'date' (fecha sin hora).
-    """
     out = df.copy()
-    out.index = pd.to_datetime(out.index)
     out["date"] = out.index.date
     cols = ["date"] + [c for c in out.columns if c != "date"]
     return out[cols]
 
 
 def add_minute_of_day(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Agrega:
-      - minute_of_day = hour*60 + minute
-      - hour, minute
-    """
     out = df.copy()
     out["minute_of_day"] = out.index.hour * 60 + out.index.minute
     out["hour"] = out.index.hour
@@ -81,21 +114,12 @@ def add_minute_of_day(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# ============================================================
-# 2) Cálculo de deltas futuros por día (sin cruzar sesión)
-# ============================================================
 def add_future_delta_pts_by_day(
     df: pd.DataFrame,
     close_col: str = "close",
     date_col: str = "date",
     horizons: Tuple[int, ...] = (60, 90),
 ) -> pd.DataFrame:
-    """
-    Por cada horizonte h:
-      Δpts_{t,h} = close_{t+h} - close_t   (shift(-h) dentro del mismo día)
-      abs_delta_pts_{h} = |Δ|
-      sign_delta_{h} = sign(Δ)
-    """
     out = df.copy()
     g = out.groupby(date_col, sort=False)
 
@@ -108,17 +132,10 @@ def add_future_delta_pts_by_day(
     return out
 
 
-# ============================================================
-# 3) Estadísticos por minuto del día (ranking)
-# ============================================================
+# ---------------------------------------------------------------------
+# Stats por minuto del día
+# ---------------------------------------------------------------------
 def stats_by_minute_of_day(df: pd.DataFrame, h: int) -> pd.DataFrame:
-    """
-    Estadísticos por minute_of_day para un horizonte h:
-      - n
-      - mean_abs, median_abs
-      - percentiles p60, p70, p80, p90 de |Δ|
-      - pos_ratio / neg_ratio (sesgo direccional simple)
-    """
     base = df[["minute_of_day", f"delta_pts_{h}", f"abs_delta_pts_{h}"]].dropna()
     g = base.groupby("minute_of_day", sort=True)
 
@@ -136,57 +153,24 @@ def stats_by_minute_of_day(df: pd.DataFrame, h: int) -> pd.DataFrame:
 
     out["hour"] = (out.index // 60).astype(int)
     out["minute"] = (out.index % 60).astype(int)
-
     return out.sort_index()
 
 
 def top_minutes(df_by_time: pd.DataFrame, col: str, top_n: int = 30) -> pd.DataFrame:
-    """
-    Top-N minutos del día según 'col'. Imprime ventana horaria del top.
-    """
     cols_show = [
         "hour", "minute", "n",
         "mean_abs", "median_abs",
         "p60_abs", "p70_abs", "p80_abs", "p90_abs",
         "pos_ratio", "neg_ratio",
     ]
-
-    top_df = (
-        df_by_time.sort_values(col, ascending=False)[cols_show]
-        .head(top_n)
-        .copy()
-    )
-
-    # Ventana (min/max) dentro del top
-    minute_of_day = top_df["hour"] * 60 + top_df["minute"]
-    min_mod = int(minute_of_day.min())
-    max_mod = int(minute_of_day.max())
-
-    min_time = f"{min_mod//60:02d}:{min_mod%60:02d}"
-    max_time = f"{max_mod//60:02d}:{max_mod%60:02d}"
-
-    min_val = float(top_df[col].min())
-    max_val = float(top_df[col].max())
-
-    #print("=" * 60)
-    #print(f"Top {top_n} según '{col}'")
-    #print(f"Ventana horaria: {min_time}  ->  {max_time}")
-    #print(f"{col} mínimo: {min_val:.2f}")
-    #print(f"{col} máximo: {max_val:.2f}")
-    #print("=" * 60)
-
-    return top_df
+    return df_by_time.sort_values(col, ascending=False)[cols_show].head(top_n).copy()
 
 
 def delta_midpoint(delta_min: float, delta_max: float) -> float:
-    """Punto medio entre min y max (robusto como estimador operativo)."""
     return float(delta_min + (delta_max - delta_min) / 2.0)
 
 
 def optimal_window_from_rankings(*tops: pd.DataFrame) -> Dict[str, Any]:
-    """
-    Intersección horaria robusta a partir de varios rankings (top_med/top_p70/top_p90).
-    """
     starts, ends = [], []
     for df in tops:
         mod = df["hour"] * 60 + df["minute"]
@@ -206,18 +190,11 @@ def optimal_window_from_rankings(*tops: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
-# ============================================================
-# 4) Stop Loss empírico (MAE hasta TP)
-# ============================================================
+# ---------------------------------------------------------------------
+# MAE hasta TP (numba)
+# ---------------------------------------------------------------------
 @njit
 def _mae_until_tp_numba(close, high, low, sign, h, tp_pts):
-    """
-    MAE hasta TP o hasta horizonte h (lo que ocurra primero), por día.
-    Devuelve:
-      mae[i]   : adverse excursion en pts
-      tp_hit[i]: True si tocó TP dentro de h
-      tau[i]   : minutos hasta salida (TP o vencimiento)
-    """
     n = close.shape[0]
     mae = np.full(n, np.nan)
     tp_hit = np.zeros(n, dtype=np.bool_)
@@ -232,19 +209,16 @@ def _mae_until_tp_numba(close, high, low, sign, h, tp_pts):
             continue
 
         entry = close[i]
-        u_exit = h  # default: vence horizonte
+        u_exit = h
 
         if s > 0:  # LONG
             tp_price = entry + tp_pts
-
-            # primer u donde high >= tp_price
             for u in range(1, h + 1):
                 if high[i + u] >= tp_price:
                     u_exit = u
                     tp_hit[i] = True
                     break
 
-            # MAE LONG: entry - min(low) en [i+1, i+u_exit]
             min_low = low[i + 1]
             for u in range(2, u_exit + 1):
                 v = low[i + u]
@@ -254,17 +228,14 @@ def _mae_until_tp_numba(close, high, low, sign, h, tp_pts):
             mae[i] = entry - min_low
             tau[i] = u_exit
 
-        else:      # SHORT
+        else:  # SHORT
             tp_price = entry - tp_pts
-
-            # primer u donde low <= tp_price
             for u in range(1, h + 1):
                 if low[i + u] <= tp_price:
                     u_exit = u
                     tp_hit[i] = True
                     break
 
-            # MAE SHORT: max(high) en [i+1, i+u_exit] - entry
             max_high = high[i + 1]
             for u in range(2, u_exit + 1):
                 v = high[i + u]
@@ -287,11 +258,6 @@ def compute_mae_until_tp_fast(
     low_col: str = "low",
     sign_col: str | None = None,
 ) -> pd.DataFrame:
-    """
-    Wrapper por día + Numba.
-    Retorna columnas:
-      mae_tp_{h}, tp_hit_{h}, tau_{h}
-    """
     if sign_col is None:
         sign_col = f"sign_delta_{h}"
 
@@ -304,18 +270,16 @@ def compute_mae_until_tp_fast(
     hit_out = np.zeros(len(df), dtype=bool)
     tau_out = np.full(len(df), np.nan, dtype=float)
 
-    # Mantener orden del DF: asignación por posiciones
     for _, g in df.groupby(date_col, sort=False):
         idx = g.index.to_numpy()
         locs = df.index.get_indexer(idx)
 
         close = g[close_col].to_numpy(dtype=np.float64)
         high = g[high_col].to_numpy(dtype=np.float64)
-        low  = g[low_col].to_numpy(dtype=np.float64)
+        low = g[low_col].to_numpy(dtype=np.float64)
         sign = g[sign_col].to_numpy(dtype=np.float64)
 
         mae_d, hit_d, tau_d = _mae_until_tp_numba(close, high, low, sign, h, tp_pts)
-
         mae_out[locs] = mae_d
         hit_out[locs] = hit_d
         tau_out[locs] = tau_d
@@ -332,7 +296,6 @@ def mae_percentiles_by_time(
     percentiles=(0.7, 0.8),
     minute_col: str = "minute_of_day",
 ) -> pd.DataFrame:
-    """Percentiles del MAE por minute_of_day."""
     base = df[[minute_col, mae_col]].dropna().copy()
     g = base.groupby(minute_col)[mae_col]
 
@@ -345,41 +308,35 @@ def mae_percentiles_by_time(
     out = out.reset_index()
     out["hour"] = (out[minute_col] // 60).astype(int)
     out["minute"] = (out[minute_col] % 60).astype(int)
-    out["time_hm"] = out["hour"].astype(str).str.zfill(2) + ":" + out["minute"].astype(str).str.zfill(2)
-
     return out.sort_values(minute_col).reset_index(drop=True)
 
 
-def top_minutes_mae(mae_pct: pd.DataFrame, col: str, top_n: int = 30) -> pd.DataFrame:
-    """Top-N minutos según percentil MAE (p70/p80)."""
-    cols_show = ["hour", "minute", "time_hm", "n", col]
-    return mae_pct.sort_values(col, ascending=False)[cols_show].head(top_n).copy()
-
-
-def filter_window(df: pd.DataFrame, start_hhmm: str, end_hhmm: str) -> pd.DataFrame:
-    """Filtra por ventana HH:MM (incluye ambos extremos)."""
+def filter_window(mae_pct: pd.DataFrame, start_hhmm: str, end_hhmm: str, minute_col: str = "minute_of_day") -> pd.DataFrame:
     start = int(start_hhmm.split(":")[0]) * 60 + int(start_hhmm.split(":")[1])
     end = int(end_hhmm.split(":")[0]) * 60 + int(end_hhmm.split(":")[1])
-    return df[(df["minute_of_day"] >= start) & (df["minute_of_day"] <= end)].copy()
+    return mae_pct[(mae_pct[minute_col] >= start) & (mae_pct[minute_col] <= end)].copy()
 
 
-# ============================================================
-# 5) Construcción del summary report
-# ============================================================
-def build_stage03a_summary_report(
-    delta_base_med_60, delta_target_p70_60, delta_tail_p90_60,
-    delta_base_med_90, delta_target_p70_90, delta_tail_p90_90,
+# ---------------------------------------------------------------------
+# Summary legacy (tabla final) y envelope
+# ---------------------------------------------------------------------
+def build_summary_table(
+    *,
+    delta_base_med_60: float,
+    delta_target_p70_60: float,
+    delta_tail_p90_60: float,
+    delta_base_med_90: float,
+    delta_target_p70_90: float,
+    delta_tail_p90_90: float,
     window_60: Dict[str, Any],
     window_90: Dict[str, Any],
-    stop_loss_60_p70, stop_loss_60_p80,
-    stop_loss_90_p70, stop_loss_90_p80,
-    rr_min: float = 2.0,
-    decimals: int = 2
+    stop_loss_60_p70: float,
+    stop_loss_60_p80: float,
+    stop_loss_90_p70: float,
+    stop_loss_90_p80: float,
+    rr_min: float,
+    decimals: int,
 ) -> pd.DataFrame:
-    """
-    Construye el summary técnico del stage 03a.
-    No imprime ni formatea para consola.
-    """
     rows = [
         {
             "horizon_min": 60,
@@ -403,29 +360,23 @@ def build_stage03a_summary_report(
 
     df = pd.DataFrame(rows)
 
-    # Reward / Risk
     df["RR_target_p70_vs_SL_p70"] = df["delta_target_p70"] / df["stop_loss_p70"]
     df["RR_target_p70_vs_SL_p80"] = df["delta_target_p70"] / df["stop_loss_p80"]
-    df["RR_tail_p90_vs_SL_p70"]   = df["delta_tail_p90"]   / df["stop_loss_p70"]
-    df["RR_tail_p90_vs_SL_p80"]   = df["delta_tail_p90"]   / df["stop_loss_p80"]
+    df["RR_tail_p90_vs_SL_p70"] = df["delta_tail_p90"] / df["stop_loss_p70"]
+    df["RR_tail_p90_vs_SL_p80"] = df["delta_tail_p90"] / df["stop_loss_p80"]
 
-    def recommend_stop(row):
+    def recommend_stop(row: pd.Series) -> pd.Series:
         rr_p70 = row["RR_target_p70_vs_SL_p70"]
         if pd.notna(rr_p70) and rr_p70 >= rr_min:
-            return pd.Series({
-                "stop_recomendado_tipo": "p70",
-                "stop_recomendado": row["stop_loss_p70"],
-                "RR_recomendado": rr_p70,
-            })
-        return pd.Series({
-            "stop_recomendado_tipo": "p80",
-            "stop_recomendado": row["stop_loss_p80"],
-            "RR_recomendado": row["RR_target_p70_vs_SL_p80"],
-        })
+            return pd.Series(
+                {"stop_recomendado_tipo": "p70", "stop_recomendado": row["stop_loss_p70"], "RR_recomendado": rr_p70}
+            )
+        return pd.Series(
+            {"stop_recomendado_tipo": "p80", "stop_recomendado": row["stop_loss_p80"], "RR_recomendado": row["RR_target_p70_vs_SL_p80"]}
+        )
 
     df = pd.concat([df, df.apply(recommend_stop, axis=1)], axis=1)
 
-    # Redondeo técnico
     for c in df.columns:
         if c not in ["horizon_min", "optimal_window", "stop_recomendado_tipo"]:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -434,224 +385,248 @@ def build_stage03a_summary_report(
 
     return df
 
-# ============================================================
-# Visualización
-# ============================================================
+
+def df_to_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    return json.loads(df.to_json(orient="records"))
 
 
-def print_stage03a_summary_pretty(df: pd.DataFrame) -> None:
-    """
-    Presentación amigable para consola (Git Bash).
-    """
-    def f(x):
-        return "-" if pd.isna(x) else f"{float(x):.2f}"
-
-    print("\nObjetivos operativos dictados por el mercado:\n")
-
-    for _, r in df.iterrows():
-        h = int(r["horizon_min"])
-        print("=" * 70)
-        print(f"RESUMEN H={h} min   |   Ventana óptima: {r['optimal_window']}")
-        print("-" * 70)
-        print(
-            f"Deltas (pts)        | "
-            f"base: {f(r['delta_base_med'])}   "
-            f"target: {f(r['delta_target_p70'])}   "
-            f"tail: {f(r['delta_tail_p90'])}"
-        )
-        print(
-            f"Stop Loss (pts)     | "
-            f"p70: {f(r['stop_loss_p70'])}   "
-            f"p80: {f(r['stop_loss_p80'])}   "
-            f"recomendado: {r['stop_recomendado_tipo']} -> {f(r['stop_recomendado'])}"
-        )
-        print(
-            f"Risk/Reward         | "
-            f"TP/SL(p70): {f(r['RR_target_p70_vs_SL_p70'])}   "
-            f"TP/SL(p80): {f(r['RR_target_p70_vs_SL_p80'])}"
-        )
-        print(
-            f"                   | "
-            f"Tail/SL(p70): {f(r['RR_tail_p90_vs_SL_p70'])}   "
-            f"Tail/SL(p80): {f(r['RR_tail_p90_vs_SL_p80'])}"
-        )
-        print(f"RR recomendado      | {f(r['RR_recomendado'])}")
-
-    print("=" * 70)
-
-
-# ============================================================
-# 6) MLFlow
-# ============================================================
-
-# ============================================================
-# 6.1) Construcción de mlflow_summary
-# ============================================================
-def build_stage03a_mlflow_summary(
-    summary_df: pd.DataFrame,
-    rr_min: float
-) -> dict:
-    """
-    Summary reducido (params + metrics) para MLflow.
-    """
-    out = {
-        "params": {
-            "rr_min": rr_min,
-            "horizons": summary_df["horizon_min"].tolist(),
+def build_envelope(
+    *,
+    in_path: Path,
+    report_path: Path,
+    params: Dict[str, Any],
+    metrics: Dict[str, float],
+    summary_rows: List[Dict[str, Any]],
+    details: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "stage": "stage_03a_target_investigation",
+        "created_at_utc": _iso_utc_now(),
+        "version": "1.0",
+        "paths": {
+            "inputs": {"intraday_parquet": str(in_path.as_posix())},
+            "outputs": {},
+            "reports": {"summary": str(report_path.as_posix())},
         },
-        "metrics": {}
+        "params": params,
+        "metrics": metrics,
+        "details": {
+            # <- AQUÍ está tu estructura legacy, intacta, en un solo archivo
+            "summary_rows": summary_rows,
+            **details,
+        },
     }
 
-    for _, r in summary_df.iterrows():
-        h = int(r["horizon_min"])
-        out["metrics"].update({
-            f"h{h}_delta_base": float(r["delta_base_med"]),
-            f"h{h}_delta_target_p70": float(r["delta_target_p70"]),
-            f"h{h}_delta_tail_p90": float(r["delta_tail_p90"]),
-            f"h{h}_stop_recommended": float(r["stop_recomendado"]),
-            f"h{h}_RR_recommended": float(r["RR_recomendado"]),
-        })
 
-    return out
+def print_stage_03a_summary_console(summary_rows: List[Dict[str, Any]]) -> None:
+    print("\n" + "=" * 70)
+    print("STAGE: stage_03a_target_investigation")
+    print("=" * 70)
+    for r in summary_rows:
+        h = r.get("horizon_min")
+        print("-" * 70)
+        print(f"H={h} | ventana={r.get('optimal_window')}")
+        print(f"  delta_base_med     : {r.get('delta_base_med')}")
+        print(f"  delta_target_p70   : {r.get('delta_target_p70')}")
+        print(f"  delta_tail_p90     : {r.get('delta_tail_p90')}")
+        print(f"  stop_loss_p70      : {r.get('stop_loss_p70')}")
+        print(f"  stop_loss_p80      : {r.get('stop_loss_p80')}")
+        print(f"  stop recomendado   : {r.get('stop_recomendado_tipo')} -> {r.get('stop_recomendado')}")
+        print(f"  RR recomendado     : {r.get('RR_recomendado')}")
+    print("\n" + "=" * 70 + "\n")
 
-# ============================================================
-# 6.2) Logging 
-# ============================================================
 
-def log_mlflow(summary: dict, run_name: str, artifacts: list[str] = None, enable: bool = True):
-    if (not enable) or (mlflow is None):
+# ---------------------------------------------------------------------
+# MLflow (opcional, estándar)
+# ---------------------------------------------------------------------
+def mlflow_log_from_envelope(envelope: Dict[str, Any], *, enable: bool) -> None:
+    if not enable:
+        log.info("[MLFLOW] enable=False -> omitido")
         return
 
+    try:
+        import mlflow
+    except Exception as exc:
+        log.warning("[MLFLOW] No disponible (pip install mlflow). Omitiendo. Detalle: %s", exc)
+        return
+
+    run_name = envelope.get("stage", "stage_03a_target_investigation")
+    params = envelope.get("params", {}) or {}
+    metrics = envelope.get("metrics", {}) or {}
+    report_path = (envelope.get("paths", {}) or {}).get("reports", {}).get("summary", "")
+
     with mlflow.start_run(run_name=run_name):
-        # params (planos y chicos)
-        for k, v in summary.get("params", {}).items():
+        for k, v in params.items():
             try:
-                mlflow.log_param(k, v)
+                if isinstance(v, (dict, list)):
+                    mlflow.log_param(k, json.dumps(v, ensure_ascii=False))
+                else:
+                    mlflow.log_param(k, v)
             except Exception:
                 pass
 
-        # metrics (solo numéricas)
-        def _log_metrics(prefix, d):
-            for k, v in d.items():
-                if isinstance(v, (int, float)) and np.isfinite(v):
-                    mlflow.log_metric(f"{prefix}{k}", float(v))
+        for k, v in metrics.items():
+            if isinstance(v, (int, float)) and np.isfinite(v):
+                mlflow.log_metric(k, float(v))
 
-        _log_metrics("", summary.get("metrics", {}))
-
-        # artifacts
-        if artifacts:
-            for p in artifacts:
-                if p and os.path.exists(p):
-                    mlflow.log_artifact(p)
+        try:
+            if report_path and os.path.exists(report_path):
+                mlflow.log_artifact(report_path)
+        except Exception:
+            pass
 
 
+# ---------------------------------------------------------------------
+# parse_args (override estándar + alias legacy)
+# ---------------------------------------------------------------------
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="stage_03a_target_investigation (MNQ)")
+
+    p.add_argument("--in-intraday-parquet", default=str(IN_INTRADAY_PARQUET))
+    p.add_argument("--report-summary", default=str(REPORT_SUMMARY))
+
+    p.add_argument("--top-n", type=int, default=TOP_N)
+    p.add_argument("--rr-min", type=float, default=RR_MIN)
+    p.add_argument("--decimals", type=int, default=DECIMALS)
+
+    p.add_argument(
+        "--enable-mlflow",
+        action="store_true",
+        default=os.environ.get("ENABLE_MLFLOW", "0") in {"1", "true", "True", "YES", "yes"},
+    )
+
+    # aliases (por si algún dvc.yaml viejo usa estos)
+    p.add_argument("--in-parquet", dest="in_intraday_parquet", help=argparse.SUPPRESS)
+    p.add_argument("--out-summary", dest="report_summary", help=argparse.SUPPRESS)
+
+    return p.parse_args()
 
 
-# ============================================================
-# 7) Main
-# ============================================================
+# ---------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------
 def main() -> None:
-    # ---- 6.1 Carga ----
-    log.info("[1] Cargando dataset mnq_intraday.parquet")
-    mnq = load_mnq_parquet(IN_PARQUET)
-    mnq = add_column_date(mnq)
-    mnq = mnq.sort_index()
+    log.info("[0] Parseando argumentos (CLI/env)")
+    args = parse_args()
 
-    # ---- 6.2 Deltas + minuto del día ----
-    log.info("[2] Agregando columna 'date' y asegurando orden temporal")
-    mnq = add_future_delta_pts_by_day(mnq, horizons=(60, 90))
-    mnq = add_minute_of_day(mnq)
+    in_parquet = Path(args.in_intraday_parquet)
+    report_summary = Path(args.report_summary)
 
-    # ---- 6.3 Stats por minuto (ranking) ----
-    log.info("[3] Calculando deltas futuros (H=60, H=90)")
-    by_time_60 = stats_by_minute_of_day(mnq, h=60)
-    by_time_90 = stats_by_minute_of_day(mnq, h=90)
+    log.info("[1] Cargando intraday parquet: %s", in_parquet)
+    df = load_mnq_parquet(in_parquet)
 
-    # Rankings top-30 por métrica (mediana/p70/p90)
-    log.info("[4] Construyendo rankings por minuto")
-    top_med_60 = top_minutes(by_time_60, col="median_abs", top_n=30)
-    top_p70_60 = top_minutes(by_time_60, col="p70_abs", top_n=30)
-    top_p90_60 = top_minutes(by_time_60, col="p90_abs", top_n=30)
+    log.info("[2] Agregando columnas base y asegurando orden temporal")
+    df = add_column_date(df).sort_index()
+    df = add_future_delta_pts_by_day(df, horizons=HORIZONS)
+    df = add_minute_of_day(df)
 
-    top_med_90 = top_minutes(by_time_90, col="median_abs", top_n=30)
-    top_p70_90 = top_minutes(by_time_90, col="p70_abs", top_n=30)
-    top_p90_90 = top_minutes(by_time_90, col="p90_abs", top_n=30)
+    log.info("[3] Stats por minute_of_day (H=60/90)")
+    by_time = {h: stats_by_minute_of_day(df, h=h) for h in HORIZONS}
 
-    # ---- 6.4 Deltas operativos (punto medio del rango top) ----
-    log.info("[5] Calculando los deltas operativos (median /p70 / p90)")
-    delta_base_med_60 = delta_midpoint(top_med_60["median_abs"].min(), top_med_60["median_abs"].max())
-    delta_target_p70_60 = delta_midpoint(top_p70_60["p70_abs"].min(), top_p70_60["p70_abs"].max())
-    delta_tail_p90_60 = delta_midpoint(top_p90_60["p90_abs"].min(), top_p90_60["p90_abs"].max())
+    log.info("[4] Rankings top-%s por median/p70/p90", args.top_n)
+    top = {}
+    for h in HORIZONS:
+        top[(h, "median_abs")] = top_minutes(by_time[h], col="median_abs", top_n=args.top_n)
+        top[(h, "p70_abs")] = top_minutes(by_time[h], col="p70_abs", top_n=args.top_n)
+        top[(h, "p90_abs")] = top_minutes(by_time[h], col="p90_abs", top_n=args.top_n)
 
-    delta_base_med_90 = delta_midpoint(top_med_90["median_abs"].min(), top_med_90["median_abs"].max())
-    delta_target_p70_90 = delta_midpoint(top_p70_90["p70_abs"].min(), top_p70_90["p70_abs"].max())
-    delta_tail_p90_90 = delta_midpoint(top_p90_90["p90_abs"].min(), top_p90_90["p90_abs"].max())
+    log.info("[5] Deltas operativos (midpoint del rango top)")
+    d_base_60 = delta_midpoint(top[(60, "median_abs")]["median_abs"].min(), top[(60, "median_abs")]["median_abs"].max())
+    d_tgt_60 = delta_midpoint(top[(60, "p70_abs")]["p70_abs"].min(), top[(60, "p70_abs")]["p70_abs"].max())
+    d_tail_60 = delta_midpoint(top[(60, "p90_abs")]["p90_abs"].min(), top[(60, "p90_abs")]["p90_abs"].max())
 
-    # ---- 6.5 Ventanas óptimas (intersección robusta) ----
-    log.info("[6] Determinación de ventanas de óptimas de operación")
-    optimal_window_60 = optimal_window_from_rankings(top_med_60, top_p70_60, top_p90_60)
-    optimal_window_90 = optimal_window_from_rankings(top_med_90, top_p70_90, top_p90_90)
+    d_base_90 = delta_midpoint(top[(90, "median_abs")]["median_abs"].min(), top[(90, "median_abs")]["median_abs"].max())
+    d_tgt_90 = delta_midpoint(top[(90, "p70_abs")]["p70_abs"].min(), top[(90, "p70_abs")]["p70_abs"].max())
+    d_tail_90 = delta_midpoint(top[(90, "p90_abs")]["p90_abs"].min(), top[(90, "p90_abs")]["p90_abs"].max())
 
-    # ---- 6.6 MAE hasta TP (tp_pts = delta_target_p70_h) ----
-    log.info("[7] Calculando MAE hasta TakeProfit (Stop Loss empírico)")
-    mae_60 = compute_mae_until_tp_fast(mnq, h=60, tp_pts=float(delta_target_p70_60))
-    mae_90 = compute_mae_until_tp_fast(mnq, h=90, tp_pts=float(delta_target_p70_90))
-    mnq_mae = mnq.join(mae_60).join(mae_90)
+    log.info("[6] Ventanas óptimas (intersección)")
+    w60 = optimal_window_from_rankings(top[(60, "median_abs")], top[(60, "p70_abs")], top[(60, "p90_abs")])
+    w90 = optimal_window_from_rankings(top[(90, "median_abs")], top[(90, "p70_abs")], top[(90, "p90_abs")])
 
-    # Percentiles de MAE por minuto del día
-    mae_pct_60 = mae_percentiles_by_time(mnq_mae, mae_col="mae_tp_60", percentiles=(0.7, 0.8))
-    mae_pct_90 = mae_percentiles_by_time(mnq_mae, mae_col="mae_tp_90", percentiles=(0.7, 0.8))
+    log.info("[7] MAE hasta TP (tp_pts = delta_target_p70)")
+    mae_60 = compute_mae_until_tp_fast(df, h=60, tp_pts=float(d_tgt_60))
+    mae_90 = compute_mae_until_tp_fast(df, h=90, tp_pts=float(d_tgt_90))
+    df_mae = df.join(mae_60).join(mae_90)
 
-    # ---- 6.7 Stop Loss por ventana óptima (mediana dentro de la ventana) ----
-    # Filtramos percentiles MAE dentro de la ventana óptima del movimiento (no la de MAE)
-    log.info("[8] Buscando los mejores Stop Loss para ventanas de operación")
-    mae_pct_60_win = filter_window(mae_pct_60, optimal_window_60["start_hhmm"], optimal_window_60["end_hhmm"])
-    mae_pct_90_win = filter_window(mae_pct_90, optimal_window_90["start_hhmm"], optimal_window_90["end_hhmm"])
+    mae_pct_60 = mae_percentiles_by_time(df_mae, mae_col="mae_tp_60", percentiles=(0.7, 0.8))
+    mae_pct_90 = mae_percentiles_by_time(df_mae, mae_col="mae_tp_90", percentiles=(0.7, 0.8))
 
-    stop_loss_60_p70 = float(mae_pct_60_win["p70"].median())
-    stop_loss_60_p80 = float(mae_pct_60_win["p80"].median())
-    stop_loss_90_p70 = float(mae_pct_90_win["p70"].median())
-    stop_loss_90_p80 = float(mae_pct_90_win["p80"].median())
+    log.info("[8] Stop loss por ventana óptima (mediana dentro de la ventana)")
+    mae_pct_60_win = filter_window(mae_pct_60, w60["start_hhmm"], w60["end_hhmm"])
+    mae_pct_90_win = filter_window(mae_pct_90, w90["start_hhmm"], w90["end_hhmm"])
 
-    # ---- 6.8 Tabla final (RR + stop recomendado) ----
-    log.info("[9] Construyendo target_investigation_summary.json")
-    summary_report_stage_03a = build_stage03a_summary_report(
-        delta_base_med_60, delta_target_p70_60, delta_tail_p90_60,
-        delta_base_med_90, delta_target_p70_90, delta_tail_p90_90,
-        window_60=optimal_window_60,
-        window_90=optimal_window_90,
-        stop_loss_60_p70=stop_loss_60_p70,
-        stop_loss_60_p80=stop_loss_60_p80,
-        stop_loss_90_p70=stop_loss_90_p70,
-        stop_loss_90_p80=stop_loss_90_p80,
-        decimals=2
-    )
-    
-    OUT_SUMMARY.parent.mkdir(parents=True, exist_ok=True)
+    sl60_p70 = float(mae_pct_60_win["p70"].median())
+    sl60_p80 = float(mae_pct_60_win["p80"].median())
+    sl90_p70 = float(mae_pct_90_win["p70"].median())
+    sl90_p80 = float(mae_pct_90_win["p80"].median())
 
-    summary_report_stage_03a.to_json(
-        OUT_SUMMARY, 
-        orient="records", 
-        indent=2)
-
-    log.info("[OK] Summary report escrito en: %s", OUT_SUMMARY)
-    
-
-    log.info("[10] Construyendo stage_03a_mlflow_summary")
-    mlflow_summary = build_stage03a_mlflow_summary(
-        summary_report_stage_03a,
-        rr_min=2.0
+    log.info("[9] Construyendo summary rows (legacy) + envelope único")
+    summary_df = build_summary_table(
+        delta_base_med_60=d_base_60,
+        delta_target_p70_60=d_tgt_60,
+        delta_tail_p90_60=d_tail_60,
+        delta_base_med_90=d_base_90,
+        delta_target_p70_90=d_tgt_90,
+        delta_tail_p90_90=d_tail_90,
+        window_60=w60,
+        window_90=w90,
+        stop_loss_60_p70=sl60_p70,
+        stop_loss_60_p80=sl60_p80,
+        stop_loss_90_p70=sl90_p70,
+        stop_loss_90_p80=sl90_p80,
+        rr_min=float(args.rr_min),
+        decimals=int(args.decimals),
     )
 
-    log.info("[11] Logging MLflow")
-    log_mlflow(
-        summary=mlflow_summary,
-        run_name="stage_03a_target_investigation",
-        artifacts=[str(OUT_SUMMARY)],
-        enable=bool(int(os.environ.get("ENABLE_MLFLOW", "0")))
+    summary_rows = df_to_records(summary_df)  # <- mantiene el formato que me pediste
+
+    params = {
+        "horizons": list(HORIZONS),
+        "top_n": int(args.top_n),
+        "rr_min": float(args.rr_min),
+        "decimals": int(args.decimals),
+    }
+
+    metrics = {
+        "h60_delta_base_med": float(summary_df.loc[summary_df["horizon_min"] == 60, "delta_base_med"].iloc[0]),
+        "h60_delta_target_p70": float(summary_df.loc[summary_df["horizon_min"] == 60, "delta_target_p70"].iloc[0]),
+        "h60_delta_tail_p90": float(summary_df.loc[summary_df["horizon_min"] == 60, "delta_tail_p90"].iloc[0]),
+        "h60_stop_recommended": float(summary_df.loc[summary_df["horizon_min"] == 60, "stop_recomendado"].iloc[0]),
+        "h60_rr_recommended": float(summary_df.loc[summary_df["horizon_min"] == 60, "RR_recomendado"].iloc[0]),
+        "h90_delta_base_med": float(summary_df.loc[summary_df["horizon_min"] == 90, "delta_base_med"].iloc[0]),
+        "h90_delta_target_p70": float(summary_df.loc[summary_df["horizon_min"] == 90, "delta_target_p70"].iloc[0]),
+        "h90_delta_tail_p90": float(summary_df.loc[summary_df["horizon_min"] == 90, "delta_tail_p90"].iloc[0]),
+        "h90_stop_recommended": float(summary_df.loc[summary_df["horizon_min"] == 90, "stop_recomendado"].iloc[0]),
+        "h90_rr_recommended": float(summary_df.loc[summary_df["horizon_min"] == 90, "RR_recomendado"].iloc[0]),
+    }
+
+    details = {
+        "optimal_window_60": w60,
+        "optimal_window_90": w90,
+        "stop_loss_window_medians": {
+            "h60": {"p70": sl60_p70, "p80": sl60_p80},
+            "h90": {"p70": sl90_p70, "p80": sl90_p80},
+        },
+    }
+
+    envelope = build_envelope(
+        in_path=in_parquet,
+        report_path=report_summary,
+        params=params,
+        metrics=metrics,
+        summary_rows=summary_rows,
+        details=details,
     )
 
-    print_stage03a_summary_pretty(summary_report_stage_03a)
+    log.info("[10] Guardando JSON único (envelope + legacy rows): %s", report_summary)
+    _save_json(envelope, report_summary)
+
+    log.info("[11] MLflow tracking (enable=%s)", args.enable_mlflow)
+    mlflow_log_from_envelope(envelope, enable=bool(args.enable_mlflow))
+
+    print_stage_03a_summary_console(summary_rows)
+
+    log.info("[OK] Stage_03a completo. Report: %s", report_summary)
 
 
 if __name__ == "__main__":

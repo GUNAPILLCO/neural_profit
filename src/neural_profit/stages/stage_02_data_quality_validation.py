@@ -1,246 +1,319 @@
-# stage_02_data_quality_validation.py
-# ------------------------------------------------------------
-# Stage_02: Data quality gate para dataset intradía MNQ.
-#
-# Objetivo:
-# - Validar que el dataset intradía procesado (stage_01) cumpla criterios mínimos
-#   de calidad antes de continuar con stages de targets/features/modelos.
-#
-# Puntos clave (temporalidad):
-# - Este stage NO genera features ni targets.
-# - Se permite "bajar" el DatetimeIndex a columna con reset_index SOLO para validar,
-#   pero se preserva trazabilidad temporal ordenando explícitamente por (date, datetime)
-#   y registrando checks de monotonía / duplicados.
-#
-# Output:
-# - JSON con PASS/FAIL + métricas + checks + ejemplos de filas inválidas.
-# ------------------------------------------------------------
+"""
+stage_02_data_quality_validation.py
+
+Contrato del Stage
+------------------
+Propósito:
+- Ejecutar un "quality gate" sobre el dataset intradía procesado (stage_01)
+  antes de continuar con stages de targets/features/modelos.
+
+Inputs (deps DVC):
+- data/processed/mnq_intraday.parquet
+
+Outputs (outs DVC):
+- (no genera dataset) -> solo reportes/metrics
+
+Reports (auditoría):
+- reports/stage_02_data_quality_report.json   (PASS/FAIL + métricas + checks + ejemplos)
+
+Params:
+- EXPECTED_FREQ_SECONDS
+- EXPECTED_MINUTES_PER_DAY
+- MAX_INCOMPLETE_DAYS_RATIO
+- MAX_GAP_SECONDS
+- MAX_TOTAL_NAN_RATIO
+- MAX_COL_NAN_RATIO
+- ENABLE_MLFLOW
+
+Notas:
+- Este stage NO crea features ni targets.
+- Se permite bajar DatetimeIndex a columna 'datetime' SOLO para validar;
+  se preserva trazabilidad ordenando explícitamente por (date, datetime).
+- Si PASS=False, el proceso termina con exit code 1 (corta el pipeline).
+- MLflow es opcional y, si está habilitado, loguea params/metrics + JSON como artifact.
+"""
 
 from __future__ import annotations
 
+# ---------------------------------------------------------------------
+# Imports (stdlib)
+# ---------------------------------------------------------------------
 import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-import pandas as pd
 import logging
 
+# ---------------------------------------------------------------------
+# Imports (third-party)
+# ---------------------------------------------------------------------
+import numpy as np
+import pandas as pd
 
-# ------------------------------------------------------------
-# Logging
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Logging (uniforme)
+# ---------------------------------------------------------------------
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 log = logging.getLogger("stage_02")
 
+# ---------------------------------------------------------------------
+# Configuración de rutas (DVC-friendly) - SIEMPRE PRESENTE
+# ---------------------------------------------------------------------
+IN_INTRADAY_PARQUET = Path(
+    os.environ.get("IN_INTRADAY_PARQUET", "data/processed/mnq_intraday.parquet")
+)
+REPORT_QUALITY = Path(
+    os.environ.get("REPORT_QUALITY", "reports/stage_02_data_quality_report.json")
+)
 
-# ------------------------------------------------------------
-# MLflow (opcional)
-# ------------------------------------------------------------
-try:
-    import mlflow
-except Exception:
-    mlflow = None
+# ---------------------------------------------------------------------
+# Configuración funcional (params reproducibles) - SIEMPRE PRESENTE
+# ---------------------------------------------------------------------
+STAGE_NAME = "stage_02_data_quality_validation"
+STAGE_VERSION = "1.0"
+
+EXPECTED_FREQ_SECONDS = int(os.environ.get("EXPECTED_FREQ_SECONDS", "60"))
+EXPECTED_MINUTES_PER_DAY = int(os.environ.get("EXPECTED_MINUTES_PER_DAY", "451"))
+MAX_INCOMPLETE_DAYS_RATIO = float(os.environ.get("MAX_INCOMPLETE_DAYS_RATIO", "0.01"))
+MAX_GAP_SECONDS = int(os.environ.get("MAX_GAP_SECONDS", "60"))
+MAX_TOTAL_NAN_RATIO = float(os.environ.get("MAX_TOTAL_NAN_RATIO", "0.001"))
+MAX_COL_NAN_RATIO = float(os.environ.get("MAX_COL_NAN_RATIO", "0.002"))
+
+ENABLE_MLFLOW = os.environ.get("ENABLE_MLFLOW", "0") in {"1", "true", "True", "yes", "YES"}
+
+# Columnas mínimas esperadas (contractual)
+REQUIRED_OHLCV = ("open", "high", "low", "close", "volume")
 
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Utilidades generales (reusables)
+# ---------------------------------------------------------------------
+def _ensure_parent_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def save_json(payload: Dict[str, Any], output_path: Path) -> None:
+    _ensure_parent_dir(output_path)
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def build_summary_envelope(
+    *,
+    stage: str,
+    version: str,
+    inputs: Dict[str, str],
+    outputs: Dict[str, str],
+    reports: Dict[str, str],
+    params: Dict[str, Any],
+    metrics: Dict[str, float],
+    details: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "stage": stage,
+        "created_at_utc": _utc_now_iso(),
+        "version": version,
+        "paths": {"inputs": inputs, "outputs": outputs, "reports": reports},
+        "params": params or {},
+        "metrics": metrics or {},
+        "details": details or {},
+    }
+
+
+def print_summary_console(summary: Dict[str, Any]) -> None:
+    def _fmt(x: Any) -> str:
+        return "N/A" if x is None else str(x)
+
+    print("\n" + "=" * 70)
+    print(f"STAGE: {_fmt(summary.get('stage'))}")
+    print(f"CREATED_AT_UTC: {_fmt(summary.get('created_at_utc'))}")
+    print(f"VERSION: {_fmt(summary.get('version'))}")
+    print("-" * 70)
+
+    print("[PARAMS]")
+    for k, v in (summary.get("params", {}) or {}).items():
+        print(f"  - {k}: {v}")
+
+    print("[METRICS]")
+    for k, v in (summary.get("metrics", {}) or {}).items():
+        print(f"  - {k}: {v}")
+
+    print("=" * 70 + "\n")
+
+
+def mlflow_log_from_summary(
+    *,
+    enable: bool,
+    stage: str,
+    summary: Dict[str, Any],
+    summary_path: Path,
+    run_name: Optional[str] = None,
+    tags: Optional[Dict[str, str]] = None,
+) -> None:
+    """
+    MLflow opcional.
+    Loguea params/metrics + adjunta JSON summary como artifact.
+    """
+    if not enable:
+        return
+
+    try:
+        import mlflow
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("MLflow no está instalado. Instale con: pip install mlflow") from exc
+
+    if run_name is None:
+        run_name = stage
+
+    with mlflow.start_run(run_name=run_name):
+        mlflow.set_tag("stage", stage)
+        if tags:
+            for k, v in tags.items():
+                mlflow.set_tag(k, v)
+
+        for k, v in (summary.get("params", {}) or {}).items():
+            mlflow.log_param(k, v)
+
+        for k, v in (summary.get("metrics", {}) or {}).items():
+            if isinstance(v, (int, float)) and v == v and np.isfinite(v):
+                mlflow.log_metric(k, float(v))
+
+        mlflow.log_artifact(str(summary_path))
+
+
+# ---------------------------------------------------------------------
+# Helpers de validación (puras)
+# ---------------------------------------------------------------------
 def _nan_ratio(s: pd.Series) -> float:
-    """Ratio de NaNs en una serie."""
     return float(s.isna().mean())
-
-
-def _write_report(output_path: str | Path, report: Dict[str, Any]) -> None:
-    """Escribe el reporte JSON en disco (siempre)."""
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _ensure_datetime_column(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Asegura que el DataFrame tenga una columna 'datetime' usable.
-
-    Reglas:
-    - Si el índice es DatetimeIndex: lo baja a columna con reset_index.
-      * Si ya existía una columna 'datetime' (colisión), se prioriza el índice
-        (porque es la fuente temporal principal del pipeline).
-    - Si NO hay DatetimeIndex y NO hay columna 'datetime': se considera formato inválido.
+    Asegura columna 'datetime' usable para validación.
+    - Si índice es DatetimeIndex: reset_index.
+    - Si ya existe 'datetime' como columna (colisión): prioriza el índice.
+    - Si no hay DatetimeIndex ni columna datetime: FAIL.
     """
     df = df.copy()
 
-    # Caso 1: DatetimeIndex => bajamos a columna (para validación)
     if isinstance(df.index, pd.DatetimeIndex):
         idx_name = df.index.name or "index"
 
-        # Blindaje contra colisión: si ya existe 'datetime' como columna
         if "datetime" in df.columns and idx_name != "datetime":
-            # Bajamos índice a columna auxiliar
             df = df.reset_index().rename(columns={idx_name: "datetime_index"})
-            # Priorizamos el índice (fuente temporal) como datetime definitivo
             df["datetime"] = df["datetime_index"]
             df.drop(columns=["datetime_index"], inplace=True)
         else:
-            # Caso típico: el índice se llama 'datetime' o no hay 'datetime' en columnas
             df = df.reset_index().rename(columns={idx_name: "datetime"})
 
-    # Caso 2: No DatetimeIndex => exigimos columna datetime
     if "datetime" not in df.columns:
         raise TypeError("No 'datetime' column found (expected it as DatetimeIndex or column).")
 
-    # Parse robusto por si datetime viene como string/object
     df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
-
     return df
 
 
-def _log_temporal_audit(df: pd.DataFrame, label: str) -> None:
+def _log_temporal_audit(df: pd.DataFrame, label: str) -> Tuple[int, int, List]:
     """
     Logs de auditoría temporal (NO modifican datos).
-    Útiles para detectar problemas de:
-    - duplicados
-    - orden no-monótono por día
+    Retorna:
+      - n_dup_global: duplicados globales en datetime
+      - n_bad_days: días con no-monotonía en datetime
+      - sample_days: ejemplos (hasta 10)
     """
-    # Duplicados globales en datetime
     n_dup_global = int(df["datetime"].duplicated().sum())
-    log.info(f"[CHECK:{label}] datetime duplicates (global): {n_dup_global}")
+    log.info("[CHECK:%s] datetime duplicates (global): %s", label, n_dup_global)
 
-    # Monotonía por día (tras ordenar, debería ser True para todos)
+    n_bad_days = 0
+    sample_days: List = []
     if "date" in df.columns:
-        non_monotonic_days = (
-            df.groupby("date")["datetime"]
-            .apply(lambda s: not s.is_monotonic_increasing)
-        )
+        non_monotonic_days = df.groupby("date")["datetime"].apply(lambda s: not s.is_monotonic_increasing)
         n_bad_days = int(non_monotonic_days.sum()) if len(non_monotonic_days) else 0
-        log.info(f"[CHECK:{label}] days with non-monotonic datetime: {n_bad_days}")
+        log.info("[CHECK:%s] days with non-monotonic datetime: %s", label, n_bad_days)
 
         if n_bad_days > 0:
             sample_days = non_monotonic_days[non_monotonic_days].index[:10].tolist()
-            log.warning(f"[WARN:{label}] Ejemplos de días no-monótonos: {sample_days}")
+            log.warning("[WARN:%s] Ejemplos de días no-monótonos: %s", label, sample_days)
+
+    return n_dup_global, n_bad_days, sample_days
 
 
-# ------------------------------------------------------------
-# Core validation
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Core validation (pura: NO escribe en disco)
+# ---------------------------------------------------------------------
 def validate_intraday_quality(
-    input_path: str,
-    output_path: str,
-    expected_freq_seconds: int = 60,
-    expected_minutes_per_day: int = 451,
-    max_incomplete_days_ratio: float = 0.01,
-    max_gap_seconds: int = 60,
-    max_total_nan_ratio: float = 0.001,
-    max_col_nan_ratio: float = 0.002,
-) -> Dict[str, Any]:
+    *,
+    df: pd.DataFrame,
+    expected_freq_seconds: int,
+    expected_minutes_per_day: int,
+    max_incomplete_days_ratio: float,
+    max_gap_seconds: int,
+    max_total_nan_ratio: float,
+    max_col_nan_ratio: float,
+) -> Tuple[bool, str, Dict[str, float], Dict[str, Any]]:
     """
-    Valida calidad de un dataset intradía y produce un reporte JSON (PASS/FAIL).
-
-    Suposiciones del dataset:
-    - Timestamp puede venir como DatetimeIndex (tz-aware o tz-naive) o como columna 'datetime'.
-    - Columnas mínimas: open, high, low, close, volume.
-
-    NOTA sobre reset_index:
-    - Se utiliza únicamente para convertir el índice temporal en columna y poder validar.
-    - No se altera el contenido temporal: se ordena explícitamente por (date, datetime).
+    Ejecuta las validaciones y devuelve:
+      - passed (bool)
+      - reason (str)
+      - metrics (dict[str,float])  -> MLflow-friendly
+      - details (dict)            -> JSON-serializable (checks + ejemplos)
     """
-
     # -----------------------------
-    # 1) Leer dataset
+    # 1) datetime + fail temprano
     # -----------------------------
-    if not Path(input_path).exists():
-        report = {
-            "pass": False,
-            "reason": f"Input parquet not found: {input_path}",
-            "metrics": {},
-            "checks": {},
-            "invalid_examples": [],
-        }
-        _write_report(output_path, report)
-        return report
+    df = _ensure_datetime_column(df)
 
-    df = pd.read_parquet(input_path).copy()
-
-    # -----------------------------
-    # 2) Asegurar columna datetime (con blindaje)
-    # -----------------------------
-    try:
-        df = _ensure_datetime_column(df)
-    except Exception as e:
-        report = {
-            "pass": False,
-            "reason": f"Failed to ensure datetime column: {type(e).__name__}: {e}",
-            "metrics": {},
-            "checks": {"datetime_column_ok": False},
-            "invalid_examples": [],
-        }
-        _write_report(output_path, report)
-        return report
-
-    # Fail temprano: datetimes inválidos (NaT)
-    if df["datetime"].isna().any():
-        bad_count = int(df["datetime"].isna().sum())
-        report = {
-            "pass": False,
-            "reason": f"Found {bad_count} invalid datetime values (NaT).",
-            "metrics": {"invalid_datetime_count": bad_count},
+    invalid_dt = int(df["datetime"].isna().sum())
+    if invalid_dt > 0:
+        metrics = {"invalid_datetime_count": float(invalid_dt)}
+        details = {
             "checks": {"datetime_parse_ok": False},
             "invalid_examples": [],
         }
-        _write_report(output_path, report)
-        return report
+        return False, f"Found {invalid_dt} invalid datetime values (NaT).", metrics, details
 
     # -----------------------------
-    # 3) Crear columna date (día de trading)
+    # 2) date + required cols
     # -----------------------------
     df["date"] = df["datetime"].dt.date
 
-    # -----------------------------
-    # 4) Validar columnas OHLCV mínimas
-    # -----------------------------
-    required_cols = {"open", "high", "low", "close", "volume"}
-    missing = sorted(list(required_cols - set(df.columns)))
+    missing = sorted(list(set(REQUIRED_OHLCV) - set(df.columns)))
     if missing:
-        report = {
-            "pass": False,
-            "reason": f"Missing required columns: {missing}",
-            "metrics": {},
-            "checks": {"required_cols_ok": False},
-            "invalid_examples": [],
-        }
-        _write_report(output_path, report)
-        return report
+        details = {"checks": {"required_cols_ok": False}, "missing_cols": missing, "invalid_examples": []}
+        return False, f"Missing required columns: {missing}", {}, details
 
     # -----------------------------
-    # 5) Orden explícito (preserva trazabilidad temporal)
+    # 3) orden temporal explícito
     # -----------------------------
     df = df.sort_values(["date", "datetime"]).reset_index(drop=True)
-
-    # Auditoría temporal (logs)
-    _log_temporal_audit(df, label="post_sort")
+    n_dup_global, n_bad_days, sample_bad_days = _log_temporal_audit(df, label="post_sort")
 
     # -----------------------------
-    # 6) Métricas NaNs
+    # 4) NaNs
     # -----------------------------
-    # Nota: incluimos todas las columnas actuales del df, incluyendo 'date'
-    # y futuras columnas auxiliares. Si prefiere, puede filtrar solo OHLCV.
     col_nan = {c: _nan_ratio(df[c]) for c in df.columns}
     total_nan_ratio = float(df.isna().mean().mean())
 
     # -----------------------------
-    # 7) Duplicados por (date, datetime)
+    # 5) duplicados por (date, datetime)
     # -----------------------------
     dup_mask = df.duplicated(subset=["date", "datetime"], keep=False)
     dup_count = int(dup_mask.sum())
 
     # -----------------------------
-    # 8) Días incompletos (por conteo de registros/día)
+    # 6) días incompletos (conteo)
     # -----------------------------
     counts_per_day = df.groupby("date")["datetime"].count()
     days_total = int(counts_per_day.shape[0])
@@ -250,27 +323,24 @@ def validate_intraday_quality(
     incomplete_days_ratio = float(incomplete_days_count / days_total) if days_total else 1.0
 
     # -----------------------------
-    # 9) Gaps intradía
-    #    diff entre timestamps consecutivos dentro del mismo día (segundos)
+    # 7) gaps intradía
     # -----------------------------
     df["ts_diff_sec"] = df.groupby("date")["datetime"].diff().dt.total_seconds()
 
-    # gaps mayores a expected_freq_seconds para estimar el máximo encontrado
-    gap_mask = df["ts_diff_sec"] > expected_freq_seconds
-
-    # gaps mayores al máximo permitido => FAIL si hay alguno
     gaps_over_max = df["ts_diff_sec"] > max_gap_seconds
     gaps_count = int(gaps_over_max.sum())
+
+    gap_mask = df["ts_diff_sec"] > expected_freq_seconds
     max_gap_found = float(df.loc[gap_mask, "ts_diff_sec"].max()) if gap_mask.any() else 0.0
 
     # -----------------------------
-    # 10) Valores inválidos OHLCV
+    # 8) valores inválidos OHLCV
     # -----------------------------
     invalid_mask = (
-        (df["high"] < df["low"]) |
-        (df["close"] < df["low"]) |
-        (df["close"] > df["high"]) |
-        (df["volume"] < 0)
+        (df["high"] < df["low"])
+        | (df["close"] < df["low"])
+        | (df["close"] > df["high"])
+        | (df["volume"] < 0)
     )
     invalid_count = int(invalid_mask.sum())
 
@@ -278,12 +348,12 @@ def validate_intraday_quality(
     if invalid_count > 0:
         sample = df.loc[
             invalid_mask,
-            ["date", "datetime", "open", "high", "low", "close", "volume"]
+            ["date", "datetime", "open", "high", "low", "close", "volume"],
         ].head(20)
         invalid_examples = sample.astype(str).to_dict(orient="records")
 
     # -----------------------------
-    # 11) Checks + PASS/FAIL
+    # 9) checks + PASS/FAIL
     # -----------------------------
     checks = {
         "datetime_parse_ok": True,
@@ -294,117 +364,195 @@ def validate_intraday_quality(
         "gaps_ok": gaps_count == 0,
         "duplicates_ok": dup_count == 0,
         "invalid_values_ok": invalid_count == 0,
-    }
-    passed = all(checks.values())
-
-    report: Dict[str, Any] = {
-        "pass": bool(passed),
-        "reason": None if passed else "Quality checks failed (see checks/metrics).",
-        "metrics": {
-            "days_total": days_total,
-            "incomplete_days_count": incomplete_days_count,
-            "incomplete_days_ratio": incomplete_days_ratio,
-            "gaps_count": gaps_count,
-            "max_gap_seconds_found": max_gap_found,
-            "duplicates_count": dup_count,
-            "invalid_values_count": invalid_count,
-            "total_nan_ratio": total_nan_ratio,
-            **{f"nan_ratio__{k}": float(v) for k, v in col_nan.items()},
-        },
-        "checks": checks,
-        "invalid_examples": invalid_examples,
+        # Auditoría extra (no gatea por defecto, pero queda registrado)
+        "audit_days_non_monotonic_ok": n_bad_days == 0,
+        "audit_global_datetime_duplicates_ok": n_dup_global == 0,
     }
 
-    # -----------------------------
-    # 12) Guardar JSON
-    # -----------------------------
-    _write_report(output_path, report)
-
-    return report
-
-
-# ------------------------------------------------------------
-# CLI entrypoint
-# ------------------------------------------------------------
-def main() -> None:
-    log.info("[0] Parseando argumentos (CLI)")
-    p = argparse.ArgumentParser()
-    p.add_argument("--input", required=True, help="Input parquet (ej: data/processed/mnq_intraday.parquet)")
-    p.add_argument("--output", required=True, help="Output report json (ej: reports/data_validation.json)")
-
-    p.add_argument("--expected_freq_seconds", type=int, default=60)
-    p.add_argument("--expected_minutes_per_day", type=int, default=451)
-    p.add_argument("--max_incomplete_days_ratio", type=float, default=0.01)
-    p.add_argument("--max_gap_seconds", type=int, default=60)
-    p.add_argument("--max_total_nan_ratio", type=float, default=0.001)
-    p.add_argument("--max_col_nan_ratio", type=float, default=0.002)
-
-    args = p.parse_args()
-
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    log.info("[0.1] Output report path: %s", out)
-
-    log.info("[1] Ejecutando validación de calidad (quality gate)")
-    log.info(
-        "[1.1] Params: freq=%ss, minutes/day=%s, max_incomplete_ratio=%.4f, max_gap=%ss, "
-        "max_total_nan=%.6f, max_col_nan=%.6f",
-        args.expected_freq_seconds,
-        args.expected_minutes_per_day,
-        args.max_incomplete_days_ratio,
-        args.max_gap_seconds,
-        args.max_total_nan_ratio,
-        args.max_col_nan_ratio,
+    passed = all(
+        checks[k]
+        for k in [
+            "datetime_parse_ok",
+            "required_cols_ok",
+            "total_nan_ratio_ok",
+            "col_nan_ratio_ok",
+            "incomplete_days_ratio_ok",
+            "gaps_ok",
+            "duplicates_ok",
+            "invalid_values_ok",
+        ]
     )
 
-    try:
-        report = validate_intraday_quality(
-            input_path=args.input,
-            output_path=args.output,
-            expected_freq_seconds=args.expected_freq_seconds,
-            expected_minutes_per_day=args.expected_minutes_per_day,
-            max_incomplete_days_ratio=args.max_incomplete_days_ratio,
-            max_gap_seconds=args.max_gap_seconds,
-            max_total_nan_ratio=args.max_total_nan_ratio,
-            max_col_nan_ratio=args.max_col_nan_ratio,
+    reason = None if passed else "Quality checks failed (see checks/metrics)."
+
+    # -----------------------------
+    # 10) metrics (MLflow-friendly)
+    # -----------------------------
+    metrics: Dict[str, float] = {
+        "pass": 1.0 if passed else 0.0,
+        "days_total": float(days_total),
+        "incomplete_days_count": float(incomplete_days_count),
+        "incomplete_days_ratio": float(incomplete_days_ratio),
+        "gaps_count": float(gaps_count),
+        "max_gap_seconds_found": float(max_gap_found),
+        "duplicates_count": float(dup_count),
+        "invalid_values_count": float(invalid_count),
+        "total_nan_ratio": float(total_nan_ratio),
+        "audit_global_datetime_duplicates": float(n_dup_global),
+        "audit_days_non_monotonic": float(n_bad_days),
+    }
+    # ratios por columna (prefijo estable)
+    metrics.update({f"nan_ratio__{k}": float(v) for k, v in col_nan.items()})
+
+    # -----------------------------
+    # 11) details (JSON-serializable)
+    # -----------------------------
+    details: Dict[str, Any] = {
+        "reason": reason,
+        "checks": checks,
+        "thresholds": {
+            "expected_freq_seconds": expected_freq_seconds,
+            "expected_minutes_per_day": expected_minutes_per_day,
+            "max_incomplete_days_ratio": max_incomplete_days_ratio,
+            "max_gap_seconds": max_gap_seconds,
+            "max_total_nan_ratio": max_total_nan_ratio,
+            "max_col_nan_ratio": max_col_nan_ratio,
+        },
+        "audit": {
+            "datetime_duplicates_global": n_dup_global,
+            "days_non_monotonic": n_bad_days,
+            "sample_days_non_monotonic": sample_bad_days,
+        },
+        "invalid_examples": invalid_examples,
+        "incomplete_days_sample": {
+            "n": int(incomplete_days_count),
+            "dates": [str(d) for d in incomplete_days.index[:20].tolist()] if incomplete_days_count else [],
+        },
+    }
+
+    return bool(passed), (reason or ""), metrics, details
+
+
+# ---------------------------------------------------------------------
+# CLI (argparse) - override (no inventa defaults)
+# ---------------------------------------------------------------------
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Stage_02: Intraday data quality validation (gate).")
+
+    p.add_argument("--in-intraday-parquet", type=str, default=str(IN_INTRADAY_PARQUET))
+    p.add_argument("--report-quality", type=str, default=str(REPORT_QUALITY))
+
+    p.add_argument("--expected-freq-seconds", type=int, default=int(EXPECTED_FREQ_SECONDS))
+    p.add_argument("--expected-minutes-per-day", type=int, default=int(EXPECTED_MINUTES_PER_DAY))
+    p.add_argument("--max-incomplete-days-ratio", type=float, default=float(MAX_INCOMPLETE_DAYS_RATIO))
+    p.add_argument("--max-gap-seconds", type=int, default=int(MAX_GAP_SECONDS))
+    p.add_argument("--max-total-nan-ratio", type=float, default=float(MAX_TOTAL_NAN_RATIO))
+    p.add_argument("--max-col-nan-ratio", type=float, default=float(MAX_COL_NAN_RATIO))
+
+    p.add_argument(
+        "--enable-mlflow",
+        action="store_true",
+        default=ENABLE_MLFLOW,
+        help="Si se activa, registra params/métricas en MLflow",
+    )
+
+    # Aliases (compatibilidad con versiones viejas)
+    p.add_argument("--input", type=str, dest="in_intraday_parquet", help=argparse.SUPPRESS)
+    p.add_argument("--output", type=str, dest="report_quality", help=argparse.SUPPRESS)
+
+    return p.parse_args()
+
+
+# ---------------------------------------------------------------------
+# Main (orquestación)
+# ---------------------------------------------------------------------
+def main() -> None:
+    log.info("[0] Parseando argumentos (CLI/env)")
+    args = parse_args()
+
+    in_parquet = Path(args.in_intraday_parquet)
+    report_path = Path(args.report_quality)
+
+    params: Dict[str, Any] = {
+        "in_intraday_parquet": str(in_parquet.as_posix()),
+        "report_quality": str(report_path.as_posix()),
+        "expected_freq_seconds": int(args.expected_freq_seconds),
+        "expected_minutes_per_day": int(args.expected_minutes_per_day),
+        "max_incomplete_days_ratio": float(args.max_incomplete_days_ratio),
+        "max_gap_seconds": int(args.max_gap_seconds),
+        "max_total_nan_ratio": float(args.max_total_nan_ratio),
+        "max_col_nan_ratio": float(args.max_col_nan_ratio),
+    }
+
+    log.info("[1] Cargando parquet intradía: %s", in_parquet)
+    if not in_parquet.exists():
+        # Report consistente + corte del pipeline
+        summary = build_summary_envelope(
+            stage=STAGE_NAME,
+            version=STAGE_VERSION,
+            inputs={"mnq_intraday_parquet": str(in_parquet.as_posix())},
+            outputs={},
+            reports={"quality_report": str(report_path.as_posix())},
+            params=params,
+            metrics={"pass": 0.0},
+            details={"reason": f"Input parquet not found: {in_parquet.as_posix()}"},
         )
+        save_json(summary, report_path)
+        print_summary_console(summary)
+        log.error("[FAIL] Input parquet not found. Exit code=1")
+        sys.exit(1)
 
-        passed = bool(report.get("pass"))
-        reason = report.get("reason", "")
-        log.info("[2] Validación finalizada: pass=%s", passed)
-        if reason:
-            log.info("[2.1] Reason: %s", reason)
+    df = pd.read_parquet(in_parquet).copy()
 
-        # MLflow logging (opcional)
-        if mlflow is not None:
-            log.info("[3] MLflow disponible: logueando métricas/tags")
-            with mlflow.start_run(run_name="stage_02_data_quality_validation"):
-                for k, v in report.get("metrics", {}).items():
-                    if isinstance(v, (int, float)) and np.isfinite(v):
-                        mlflow.log_metric(k, float(v))
-                mlflow.set_tag("quality_pass", str(passed))
-                for ck, ok in report.get("checks", {}).items():
-                    mlflow.set_tag(f"check__{ck}", str(ok))
-        else:
-            log.info("[3] MLflow no disponible: omitido")
+    log.info("[2] Ejecutando validación (quality gate)")
+    passed, reason, metrics, details = validate_intraday_quality(
+        df=df,
+        expected_freq_seconds=int(args.expected_freq_seconds),
+        expected_minutes_per_day=int(args.expected_minutes_per_day),
+        max_incomplete_days_ratio=float(args.max_incomplete_days_ratio),
+        max_gap_seconds=int(args.max_gap_seconds),
+        max_total_nan_ratio=float(args.max_total_nan_ratio),
+        max_col_nan_ratio=float(args.max_col_nan_ratio),
+    )
 
-    except Exception as e:
-        log.exception("[ERR] Excepción durante validate_intraday_quality")
-        report = {
-            "pass": False,
-            "reason": f"Exception: {type(e).__name__}: {e}",
-            "metrics": {},
-            "checks": {},
-            "invalid_examples": [],
-        }
-        _write_report(args.output, report)
-        log.info("[4] Report escrito pese a excepción: %s", out)
+    # Envelope estándar
+    summary = build_summary_envelope(
+        stage=STAGE_NAME,
+        version=STAGE_VERSION,
+        inputs={"mnq_intraday_parquet": str(in_parquet.as_posix())},
+        outputs={},
+        reports={"quality_report": str(report_path.as_posix())},
+        params=params,
+        metrics=metrics,
+        details=details,
+    )
+
+    log.info("[3] Guardando report JSON: %s", report_path)
+    save_json(summary, report_path)
+    print_summary_console(summary)
+
+    log.info("[4] MLflow tracking (enable=%s)", bool(args.enable_mlflow))
+    mlflow_log_from_summary(
+        enable=bool(args.enable_mlflow),
+        stage=STAGE_NAME,
+        summary=summary,
+        summary_path=report_path,
+        tags={"pipeline": "neural_profit", "dataset": "MNQ", "quality_gate": "true"},
+    )
 
     # Quality gate real: FAIL => exit code 1
-    passed = bool(report.get("pass"))
-    log.info("[5] Exit code = %s", 0 if passed else 1)
-    sys.exit(0 if passed else 1)
+    log.info("[5] Quality gate: pass=%s", passed)
+    if not passed:
+        log.error("[FAIL] %s", reason or "Quality checks failed.")
+        log.info("[5.1] Exit code=1")
+        sys.exit(1)
+
+    log.info("[OK] Stage_02 passed. Exit code=0")
+    sys.exit(0)
 
 
+# ---------------------------------------------------------------------
+# Boilerplate
+# ---------------------------------------------------------------------
 if __name__ == "__main__":
     main()

@@ -10,8 +10,8 @@ stages:
       nfiles: 22
     - path: src/neural_profit/stages/stage_00_raw_data_ingestion.py
       hash: md5
-      md5: 65771fd66fbf88c1a4698d658e47ac9d
-      size: 18692
+      md5: 6df5d6bf4903807811d5dc40afa9917e
+      size: 18457
     outs:
     - path: data/raw/mnq_raw.parquet
       hash: md5
@@ -19,12 +19,13 @@ stages:
       size: 33576640
     - path: reports/stage_00_ingest_summary.json
       hash: md5
-      md5: eee433ce4f9d4898ebe3e0c24e6a202e
-      size: 7945
+      md5: 965aacb6576db3a03f1b0e5c0b3e4909
+      size: 9647
   stage_01_intraday_data_preparation:
-    cmd: "python src/neural_profit/stages/stage_01_intraday_data_preparation.py --raw-path
-      data/raw/mnq_raw.parquet --out-parquet data/processed/mnq_intraday.parquet --out-summary
-      reports/dataset_prep_summary.json\n"
+    cmd: python src/neural_profit/stages/stage_01_intraday_data_preparation.py 
+      --in-raw-parquet data/raw/mnq_raw.parquet --out-parquet 
+      data/processed/mnq_intraday.parquet --report-summary 
+      reports/stage_01_dataset_prep_summary.json
     deps:
     - path: data/raw/mnq_raw.parquet
       hash: md5
@@ -32,22 +33,23 @@ stages:
       size: 33576640
     - path: src/neural_profit/stages/stage_01_intraday_data_preparation.py
       hash: md5
-      md5: f7d30e7aa111035e05855a4f954641e9
-      size: 21666
+      md5: 86097a796ebc882b988e2b409bc90302
+      size: 20456
     outs:
     - path: data/processed/mnq_intraday.parquet
       hash: md5
       md5: d228bdc8e0fd4298bed3102849f8854e
       size: 13780160
-    - path: reports/dataset_prep_summary.json
+    - path: reports/stage_01_dataset_prep_summary.json
       hash: md5
-      md5: 5fb4f3445f930751bcd7bef2673f6e89
-      size: 559
+      md5: 1d3b3a53e0dd82b54181c100fdc8cf56
+      size: 1808
   stage_02_data_quality_validation:
-    cmd: "python src/neural_profit/stages/stage_02_data_quality_validation.py --input
-      data/processed/mnq_intraday.parquet --output reports/data_validation.json --expected_freq_seconds
-      60 --expected_minutes_per_day 451 --max_incomplete_days_ratio 0.01 --max_gap_seconds
-      60 --max_total_nan_ratio 0.001 --max_col_nan_ratio 0.002\n"
+    cmd: python src/neural_profit/stages/stage_02_data_quality_validation.py 
+      --input data/processed/mnq_intraday.parquet --output 
+      reports/stage_02_data_quality_report.json --expected-freq-seconds 60 
+      --expected-minutes-per-day 451 --max-incomplete-days-ratio 0.01 
+      --max-gap-seconds 60 --max-total-nan-ratio 0.001 --max-col-nan-ratio 0.002
     deps:
     - path: data/processed/mnq_intraday.parquet
       hash: md5
@@ -55,23 +57,13 @@ stages:
       size: 13780160
     - path: src/neural_profit/stages/stage_02_data_quality_validation.py
       hash: md5
-      md5: b4d6fb5c55d46c6a0960f8e5fa10c038
-      size: 15772
-    params:
-      params.yaml:
-        data_quality:
-          expected_freq_seconds: 60
-          expected_minutes_per_day: 451
-          max_incomplete_days_ratio: 0.01
-          max_gap_seconds: 60
-          max_total_nan_ratio: 0.001
-          max_col_nan_ratio: 0.002
-          allow_weekends: true
+      md5: b40c27164bd1417966dc0fba81aa933b
+      size: 20874
     outs:
-    - path: reports/data_validation.json
+    - path: reports/stage_02_data_quality_report.json
       hash: md5
-      md5: a9ecbc39470df18f5d356178a5820af0
-      size: 803
+      md5: 4a6d0f11c1d136ab9b06b41ebea79176
+      size: 2214
   stage_03_target_definition:
     cmd: "python src/neural_profit/stages/stage_03_target_definition.py --input-path
       data/processed/mnq_intraday.parquet --output-labeled-path data/processed/mnq_intraday_labeled.parquet
@@ -103,7 +95,9 @@ stages:
       md5: 9a8be49b3b7a578d14668b68217a8c77
       size: 5212
   stage_03a_target_investigation:
-    cmd: "python -u src/neural_profit/stages/stage_03a_target_investigation.py\n"
+    cmd: python src/neural_profit/stages/stage_03a_target_investigation.py 
+      --in-intraday-parquet data/processed/mnq_intraday.parquet --report-summary
+      reports/stage_03a_target_investigation_summary.json
     deps:
     - path: data/processed/mnq_intraday.parquet
       hash: md5
@@ -111,72 +105,90 @@ stages:
       size: 13780160
     - path: src/neural_profit/stages/stage_03a_target_investigation.py
       hash: md5
-      md5: 731683159d7436770008374a2b1cb557
-      size: 23345
+      md5: 93e6642cf09c1a977bbf912c7222f0e6
+      size: 23810
     outs:
-    - path: reports/target_investigation_summary.json
+    - path: reports/stage_03a_target_investigation_summary.json
       hash: md5
-      md5: 293c202259f0e738c5f406a3d673e736
-      size: 877
+      md5: 7a8e973cec56cf96b03786fa7c9abd6a
+      size: 2492
   stage_03b_target_definition:
-    cmd: "python -u src/neural_profit/stages/stage_03b_target_definition.py\n"
+    cmd: python src/neural_profit/stages/stage_03b_target_definition.py 
+      --in-intraday-parquet data/processed/mnq_intraday.parquet 
+      --in-stage03a-summary reports/stage_03a_target_investigation_summary.json 
+      --out-labeled-parquet data/processed/mnq_intraday_labeled.parquet 
+      --report-summary reports/stage_03b_target_definition_summary.json
     deps:
     - path: data/processed/mnq_intraday.parquet
       hash: md5
       md5: d228bdc8e0fd4298bed3102849f8854e
       size: 13780160
-    - path: reports/target_investigation_summary.json
+    - path: reports/stage_03a_target_investigation_summary.json
       hash: md5
-      md5: 293c202259f0e738c5f406a3d673e736
-      size: 877
+      md5: 7a8e973cec56cf96b03786fa7c9abd6a
+      size: 2492
     - path: src/neural_profit/stages/stage_03b_target_definition.py
       hash: md5
-      md5: 068ea5208480a5bcfec6c80e61f1d285
-      size: 13818
+      md5: c53749d5e44f192ee83832ab5e47f446
+      size: 24624
     outs:
     - path: data/processed/mnq_intraday_labeled.parquet
       hash: md5
-      md5: 831120b119303db1afd5084575cfe6df
-      size: 13875267
-    - path: reports/target_definition_summary.json
+      md5: ddf1701e17ced9ed5e7e9f4127cac3ba
+      size: 14009069
+    - path: reports/stage_03b_target_definition_summary.json
       hash: md5
-      md5: 6d7282f3db01edf86493e874eb5520ff
-      size: 494
+      md5: 95b65092b6f691b2e8cffdf80f4da476
+      size: 22160
   stage_04_feature_engineering:
-    cmd: python src/neural_profit/stages/stage_04_feature_engineering.py
+    cmd: python src/neural_profit/stages/stage_04_feature_engineering.py 
+      --in-labeled-parquet data/processed/mnq_intraday_labeled.parquet 
+      --out-features-parquet data/features/mnq_features_target.parquet 
+      --report-summary reports/stage_04_feature_engineering_summary.json 
+      --use-volume --dropna-policy any --enable-mlflow
     deps:
     - path: data/processed/mnq_intraday_labeled.parquet
       hash: md5
-      md5: 831120b119303db1afd5084575cfe6df
-      size: 13875267
+      md5: ddf1701e17ced9ed5e7e9f4127cac3ba
+      size: 14009069
     - path: src/neural_profit/stages/stage_04_feature_engineering.py
       hash: md5
-      md5: 4b0a4d88078bb522510a6887f3647012
-      size: 13865
+      md5: d8455a448aa14a534cb68db83ae3a2d1
+      size: 18125
     outs:
     - path: data/features/mnq_features_target.parquet
       hash: md5
-      md5: ce362c35fbcd9c97d3194253e861079f
-      size: 29812335
-    - path: reports/features_target_summary.json
+      md5: d424214aa57bfe19d39e0d2ac379662e
+      size: 30819090
+    - path: reports/stage_04_feature_engineering_summary.json
       hash: md5
-      md5: ca9fae7ba6b63f16e86528a371f19866
-      size: 1235
+      md5: 215659b49850870cfc5d928f97d3901e
+      size: 1810
   stage_05_time_aware_data_splitting:
-    cmd: "python src/neural_profit/stages/stage_05_time_aware_data_splitting.py\n"
+    cmd: python src/neural_profit/stages/stage_05_time_aware_data_splitting.py 
+      --in-parquet data/features/mnq_features_target.parquet --in-schema-summary
+      reports/features_target_summary.json --params-yaml params.yaml 
+      --out-train-parquet data/splits/mnq_train.parquet --out-valid-parquet 
+      data/splits/mnq_valid.parquet --out-test-parquet 
+      data/splits/mnq_test.parquet --out-splits-json data/splits/splits.json 
+      --report-summary reports/stage_05_time_aware_data_splitting_summary.json
     deps:
     - path: data/features/mnq_features_target.parquet
       hash: md5
-      md5: ce362c35fbcd9c97d3194253e861079f
-      size: 29812335
+      md5: d424214aa57bfe19d39e0d2ac379662e
+      size: 30819090
+    - path: params.yaml
+      hash: md5
+      md5: 58b5bb539e63281a4463102e4e39f7fb
+      size: 730
     - path: reports/features_target_summary.json
       hash: md5
       md5: ca9fae7ba6b63f16e86528a371f19866
       size: 1235
     - path: src/neural_profit/stages/stage_05_time_aware_data_splitting.py
       hash: md5
-      md5: 0b90450db0fb102199dbb73e3ad7af0b
-      size: 19306
+      md5: cf3c7a11eb7b3f1329d53d9abd3d6510
+      size: 20284
     params:
       params.yaml:
         stage_05.expected_gap_minutes: 1
@@ -185,113 +197,129 @@ stages:
     outs:
     - path: data/splits/mnq_test.parquet
       hash: md5
-      md5: b9008f6a2e10aeca3a553f726e117261
-      size: 5248817
+      md5: 5c45dc461ad80233bc7a592e02989c6a
+      size: 5432080
     - path: data/splits/mnq_train.parquet
       hash: md5
-      md5: 5be90ca678e1b727ae538395fd1708be
-      size: 21206133
+      md5: 32b576d74353d48f1a4362d5a9c143f6
+      size: 21917842
     - path: data/splits/mnq_valid.parquet
       hash: md5
-      md5: 7ba7dac5654c982a2b94e897b23df7d7
-      size: 5244671
+      md5: b9c47351d7e42de733d5df94fa9ba644
+      size: 5422972
     - path: data/splits/splits.json
       hash: md5
       md5: d4d3ec3861dbbee49965eaf102ee9272
       size: 24902
-    - path: reports/splits_summary.json
+    - path: reports/stage_05_time_aware_data_splitting_summary.json
       hash: md5
-      md5: fd4d05befe045e37a61f2d08095070f6
-      size: 2700
+      md5: beb1812447ed8e608a47ed7d427ca93b
+      size: 32660
   stage_06_window_scaling_seq2seq:
-    cmd: python src/neural_profit/stages/stage_06_window_scaling_seq2seq.py
+    cmd: python src/neural_profit/stages/stage_06_window_scaling_seq2seq.py 
+      --in-train data/splits/mnq_train.parquet --in-valid 
+      data/splits/mnq_valid.parquet --in-test  data/splits/mnq_test.parquet 
+      --in-stage04-summary reports/stage_04_feature_engineering_summary.json 
+      --in-stage03b-summary reports/stage_03b_target_definition_summary.json 
+      --out-windows-dir data/windows --out-scaled-dir data/windows/scaled 
+      --report-summary reports/stage_06_window_scaling_seq2seq_summary.json
     deps:
     - path: data/splits/mnq_test.parquet
       hash: md5
-      md5: b9008f6a2e10aeca3a553f726e117261
-      size: 5248817
+      md5: 5c45dc461ad80233bc7a592e02989c6a
+      size: 5432080
     - path: data/splits/mnq_train.parquet
       hash: md5
-      md5: 5be90ca678e1b727ae538395fd1708be
-      size: 21206133
+      md5: 32b576d74353d48f1a4362d5a9c143f6
+      size: 21917842
     - path: data/splits/mnq_valid.parquet
       hash: md5
-      md5: 7ba7dac5654c982a2b94e897b23df7d7
-      size: 5244671
+      md5: b9c47351d7e42de733d5df94fa9ba644
+      size: 5422972
     - path: params.yaml
       hash: md5
-      md5: 0cc4434da3e63cf5e855413143d455f3
-      size: 448
-    - path: reports/features_target_summary.json
+      md5: 58b5bb539e63281a4463102e4e39f7fb
+      size: 730
+    - path: reports/stage_03b_target_definition_summary.json
       hash: md5
-      md5: ca9fae7ba6b63f16e86528a371f19866
-      size: 1235
+      md5: 95b65092b6f691b2e8cffdf80f4da476
+      size: 22160
+    - path: reports/stage_04_feature_engineering_summary.json
+      hash: md5
+      md5: 215659b49850870cfc5d928f97d3901e
+      size: 1810
     - path: src/neural_profit/stages/stage_06_window_scaling_seq2seq.py
       hash: md5
-      md5: 4c8109bf508a048558400c66a09be1dc
-      size: 30285
+      md5: 58fad44ff207c4d639a9738faff048fe
+      size: 27602
     params:
       params.yaml:
-        stage_06.gestation_window.end: 08:49
-        stage_06.gestation_window.start: 08:20
+        stage_06.date_col: date
+        stage_06.drop_feature_h60: roc_30
+        stage_06.drop_feature_h90: roc_60
+        stage_06.horizons:
+        - 60
+        - 90
+        stage_06.scaler_type: standard
+        stage_06.timezone_str: America/New_York
     outs:
     - path: data/windows/scaled/scaler_60.pkl
       hash: md5
-      md5: 855e69e0e4f0630c81aab1a8d6379057
-      size: 735
+      md5: 5fe544447ede4fd299f9d6000853a1b8
+      size: 775
     - path: data/windows/scaled/scaler_90.pkl
       hash: md5
-      md5: f9ef158d375a6307c01380f479f8b261
-      size: 735
+      md5: 26a7360e985bf2c5d5480f68b8db9848
+      size: 775
     - path: data/windows/scaled/windows_test_60_z.npz
       hash: md5
-      md5: e08918deaf3c31893f121266ae420de5
-      size: 294074
+      md5: 078554606ee986b59c92f586c8387322
+      size: 322589
     - path: data/windows/scaled/windows_test_90_z.npz
       hash: md5
-      md5: 5255050240dd43a8539d9bfbf84853ee
-      size: 294634
+      md5: 7d2d37b03252dafca72a471f4fddff1d
+      size: 323152
     - path: data/windows/scaled/windows_train_60_z.npz
       hash: md5
-      md5: 977d24607f3a36d23526092a5540de2b
-      size: 1355928
+      md5: 05608114cbac1099cb3f1490001ee488
+      size: 1473897
     - path: data/windows/scaled/windows_train_90_z.npz
       hash: md5
-      md5: 27a799b18844f756389ef6576b4477b0
-      size: 1357630
+      md5: 2389ecf9813b6782a972851e1ad5bca3
+      size: 1475396
     - path: data/windows/scaled/windows_valid_60_z.npz
       hash: md5
-      md5: 25368a708d2c94fcb67de2547d5972a0
-      size: 289153
+      md5: 641efd80df24a3c101df13a6d0785f4b
+      size: 318564
     - path: data/windows/scaled/windows_valid_90_z.npz
       hash: md5
-      md5: 7dfa1dff7a4e64efc31dd2decf327276
-      size: 289678
+      md5: 2d8e3463163e06254fc4cdde354ec68e
+      size: 318971
     - path: data/windows/windows_test_60.npz
       hash: md5
-      md5: 6361af54d0726d8c8680cd60d1179ab5
-      size: 200913
+      md5: 1cbce5863fe87616f1885f6490420fb9
+      size: 211674
     - path: data/windows/windows_test_90.npz
       hash: md5
-      md5: 7b4a55b0a43bf6d8b201482eb5eb528b
-      size: 201563
+      md5: e3659a60ba940d9021859bc8d5192e3e
+      size: 212306
     - path: data/windows/windows_train_60.npz
       hash: md5
-      md5: 33bf16367e50b6b630673247e86a2dbe
-      size: 915065
+      md5: 8435a4df76a9ded53b7c3d68b43e3004
+      size: 963220
     - path: data/windows/windows_train_90.npz
       hash: md5
-      md5: 782689c23fddefe7f99a0284ba0293af
-      size: 917243
+      md5: 46b4bce236cf67a19030603a5e1888f5
+      size: 965313
     - path: data/windows/windows_valid_60.npz
       hash: md5
-      md5: ab64b587151fdf5e9a5017e73bcfdea4
-      size: 196900
+      md5: dafee210de173907880d0c7c3070daf5
+      size: 207975
     - path: data/windows/windows_valid_90.npz
       hash: md5
-      md5: 28ae39c8794279ba918a997a5db87856
-      size: 197508
-    - path: reports/window_scaled_summary.json
+      md5: 82df05a5ea6f71b700b9ae543026e4ab
+      size: 208514
+    - path: reports/stage_06_window_scaling_seq2seq_summary.json
       hash: md5
-      md5: 665e7dfee2477a982e80ab05d52dbd14
-      size: 6328
+      md5: 8dd62990b83549dcdc84331152ddb29b
+      size: 6325

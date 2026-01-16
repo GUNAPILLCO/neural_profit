@@ -27,11 +27,11 @@ stages:
   # - Elimina días incompletos o con gaps
   # - Genera dataset intradía limpio + summary de calidad
   stage_01_intraday_data_preparation:
-    cmd: >
+    cmd: >-
       python src/neural_profit/stages/stage_01_intraday_data_preparation.py
-      --raw-path data/raw/mnq_raw.parquet
+      --in-raw-parquet data/raw/mnq_raw.parquet
       --out-parquet data/processed/mnq_intraday.parquet
-      --out-summary reports/dataset_prep_summary.json
+      --report-summary reports/stage_01_dataset_prep_summary.json
     deps:
       # Script del stage
     - src/neural_profit/stages/stage_01_intraday_data_preparation.py
@@ -43,7 +43,7 @@ stages:
     - data/processed/mnq_intraday.parquet
     metrics:
       # Summary liviano de preparación del dataset
-    - reports/dataset_prep_summary.json:
+    - reports/stage_01_dataset_prep_summary.json:
         cache: false
 
 
@@ -74,27 +74,21 @@ stages:
   # - Log de métricas + tag quality_pass
 
   stage_02_data_quality_validation:
-    cmd: >
+    cmd: >-
       python src/neural_profit/stages/stage_02_data_quality_validation.py
       --input data/processed/mnq_intraday.parquet
-      --output reports/data_validation.json
-      --expected_freq_seconds ${data_quality.expected_freq_seconds}
-      --expected_minutes_per_day ${data_quality.expected_minutes_per_day}
-      --max_incomplete_days_ratio ${data_quality.max_incomplete_days_ratio}
-      --max_gap_seconds ${data_quality.max_gap_seconds}
-      --max_total_nan_ratio ${data_quality.max_total_nan_ratio}
-      --max_col_nan_ratio ${data_quality.max_col_nan_ratio}
-
+      --output reports/stage_02_data_quality_report.json
+      --expected-freq-seconds 60
+      --expected-minutes-per-day 451
+      --max-incomplete-days-ratio 0.01
+      --max-gap-seconds 60
+      --max-total-nan-ratio 0.001
+      --max-col-nan-ratio 0.002
     deps:
-    - src/neural_profit/stages/stage_02_data_quality_validation.py
-    - data/processed/mnq_intraday.parquet
-
+      - data/processed/mnq_intraday.parquet
+      - src/neural_profit/stages/stage_02_data_quality_validation.py
     outs:
-    - reports/data_validation.json:
-        persist: true
-
-    params:
-    - data_quality
+      - reports/stage_02_data_quality_report.json
 
   # ------------------------------------------------------------
   # Stage 03a – Target investigation (empirical analysis)
@@ -104,19 +98,15 @@ stages:
   # - Define ventanas óptimas y stop empírico
   # - Genera artifact JSON (no modifica dataset)
   stage_03a_target_investigation:
-    cmd: >
-      python -u src/neural_profit/stages/stage_03a_target_investigation.py
-
+    cmd: >-
+      python src/neural_profit/stages/stage_03a_target_investigation.py
+      --in-intraday-parquet data/processed/mnq_intraday.parquet
+      --report-summary reports/stage_03a_target_investigation_summary.json
     deps:
-      - src/neural_profit/stages/stage_03a_target_investigation.py
       - data/processed/mnq_intraday.parquet
-
-    #outs:
-    #  - reports/target_investigation_summary.json
-
-    metrics:
-      - reports/target_investigation_summary.json:
-          cache: false
+      - src/neural_profit/stages/stage_03a_target_investigation.py
+    outs:
+      - reports/stage_03a_target_investigation_summary.json
 
   # ------------------------------------------------------------
   # Stage 03b – Target definition (empirical analysis)
@@ -126,47 +116,55 @@ stages:
   # - Define ventanas óptimas y stop empírico
   # - Genera artifact JSON (no modifica dataset)
   stage_03b_target_definition:
-    cmd: >
-      python -u src/neural_profit/stages/stage_03b_target_definition.py
-
+    cmd: >-
+      python src/neural_profit/stages/stage_03b_target_definition.py
+      --in-intraday-parquet data/processed/mnq_intraday.parquet
+      --in-stage03a-summary reports/stage_03a_target_investigation_summary.json
+      --out-labeled-parquet data/processed/mnq_intraday_labeled.parquet
+      --report-summary reports/stage_03b_target_definition_summary.json
     deps:
       - src/neural_profit/stages/stage_03b_target_definition.py
       - data/processed/mnq_intraday.parquet
-      - reports/target_investigation_summary.json
+      - reports/stage_03a_target_investigation_summary.json
     outs:
       - data/processed/mnq_intraday_labeled.parquet
-    #  - reports/target_definition_summary.json
-
-    metrics:
-      - reports/target_definition_summary.json:
-          cache: false
+      - reports/stage_03b_target_definition_summary.json
 
 
   stage_04_feature_engineering:
-    desc: >
-      Construye y consolida el conjunto final de features intradía para MNQ.
-      Incluye variables OHLC, cálculo de indicadores técnicos por jornada
-      (sin data leakage), limpieza de NaNs y generación del dataset final
-      listo para entrenamiento de modelos predictivos.
-    cmd: python src/neural_profit/stages/stage_04_feature_engineering.py
+    cmd: >-
+      python src/neural_profit/stages/stage_04_feature_engineering.py
+      --in-labeled-parquet data/processed/mnq_intraday_labeled.parquet
+      --out-features-parquet data/features/mnq_features_target.parquet
+      --report-summary reports/stage_04_feature_engineering_summary.json
+      --use-volume
+      --dropna-policy any
+      --enable-mlflow
     deps:
       - src/neural_profit/stages/stage_04_feature_engineering.py
       - data/processed/mnq_intraday_labeled.parquet
     outs:
       - data/features/mnq_features_target.parquet
     metrics:
-      - reports/features_target_summary.json:
-          cache: false
+      - reports/stage_04_feature_engineering_summary.json
+  
 
-  
-  
   stage_05_time_aware_data_splitting:
-    cmd: >
+    cmd: >-
       python src/neural_profit/stages/stage_05_time_aware_data_splitting.py
+      --in-parquet data/features/mnq_features_target.parquet
+      --in-schema-summary reports/features_target_summary.json
+      --params-yaml params.yaml
+      --out-train-parquet data/splits/mnq_train.parquet
+      --out-valid-parquet data/splits/mnq_valid.parquet
+      --out-test-parquet data/splits/mnq_test.parquet
+      --out-splits-json data/splits/splits.json
+      --report-summary reports/stage_05_time_aware_data_splitting_summary.json
     deps:
       - src/neural_profit/stages/stage_05_time_aware_data_splitting.py
       - data/features/mnq_features_target.parquet
       - reports/features_target_summary.json
+      - params.yaml
     params:
       - stage_05.train_ratio
       - stage_05.valid_ratio
@@ -177,22 +175,36 @@ stages:
       - data/splits/mnq_test.parquet
       - data/splits/splits.json
     metrics:
-      - reports/splits_summary.json:
+      - reports/stage_05_time_aware_data_splitting_summary.json:
           cache: false
 
-  
+
   stage_06_window_scaling_seq2seq:
-    cmd: python src/neural_profit/stages/stage_06_window_scaling_seq2seq.py
+    cmd: >-
+      python src/neural_profit/stages/stage_06_window_scaling_seq2seq.py
+      --in-train data/splits/mnq_train.parquet
+      --in-valid data/splits/mnq_valid.parquet
+      --in-test  data/splits/mnq_test.parquet
+      --in-stage04-summary reports/stage_04_feature_engineering_summary.json
+      --in-stage03b-summary reports/stage_03b_target_definition_summary.json
+      --out-windows-dir data/windows
+      --out-scaled-dir data/windows/scaled
+      --report-summary reports/stage_06_window_scaling_seq2seq_summary.json
     deps:
       - src/neural_profit/stages/stage_06_window_scaling_seq2seq.py
       - data/splits/mnq_train.parquet
       - data/splits/mnq_valid.parquet
       - data/splits/mnq_test.parquet
-      - reports/features_target_summary.json
+      - reports/stage_04_feature_engineering_summary.json
+      - reports/stage_03b_target_definition_summary.json
       - params.yaml
     params:
-      - stage_06.gestation_window.start
-      - stage_06.gestation_window.end
+      - stage_06.date_col
+      - stage_06.horizons
+      - stage_06.scaler_type
+      - stage_06.timezone_str
+      - stage_06.drop_feature_h60
+      - stage_06.drop_feature_h90
     outs:
       - data/windows/windows_train_60.npz
       - data/windows/windows_valid_60.npz
@@ -209,6 +221,4 @@ stages:
       - data/windows/scaled/scaler_60.pkl
       - data/windows/scaled/scaler_90.pkl
     metrics:
-      - reports/window_scaled_summary.json
-
-
+      - reports/stage_06_window_scaling_seq2seq_summary.json

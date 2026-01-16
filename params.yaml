@@ -18,6 +18,17 @@ stage_05:
   expected_gap_minutes: 1
 
 stage_06:
-  gestation_window:
-    start: "08:20"
-    end: "08:49"
+  date_col: "date"
+  horizons: [60, 90]
+
+  # "standard" (z-score) o "minmax"
+  scaler_type: "standard"
+
+  # solo informativo para el summary
+  timezone_str: "America/New_York"
+
+  # Mantener su criterio original (opcional):
+  # h60: quitar roc_30
+  # h90: quitar roc_60
+  drop_feature_h60: "roc_30"
+  drop_feature_h90: "roc_60"

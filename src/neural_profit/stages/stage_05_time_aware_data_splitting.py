@@ -1,389 +1,362 @@
 # ============================================================
 # stage_05_time_aware_data_splitting.py
-# Time-aware split (MNQ intraday) por jornadas: Train / Valid / Test
-# Lee:    data/features/mnq_features_target.parquet
-# Lee:    reports/features_target_summary.json   (schema: features/targets)
-# Guarda: data/splits/mnq_train.parquet
-#         data/splits/mnq_valid.parquet
-#         data/splits/mnq_test.parquet
-#         data/splits/splits.json
-# Report: reports/splits_summary.json
+#
+# Propósito:
+#   Split temporal por jornadas (train/valid/test) sin mezclar días.
+#
+# Inputs:
+#   - IN_FEATURES_PARQUET: data/features/mnq_features_target.parquet
+#   - IN_SCHEMA_SUMMARY  : reports/features_target_summary.json  (schema.features/targets)
+#   - PARAMS_YAML        : params.yaml (stage_05.*)
+#
+# Outputs:
+#   - OUT_TRAIN_PARQUET  : data/splits/mnq_train.parquet
+#   - OUT_VALID_PARQUET  : data/splits/mnq_valid.parquet
+#   - OUT_TEST_PARQUET   : data/splits/mnq_test.parquet
+#   - OUT_SPLITS_JSON    : data/splits/splits.json  (días por split)
+#
+# Report (envelope estándar):
+#   - REPORT_SUMMARY     : reports/stage_05_time_aware_data_splitting_summary.json
+#
+# Params (params.yaml: stage_05):
+#   - train_ratio: float
+#   - valid_ratio: float
+#   - expected_gap_minutes: int
+#
+# Notas:
+#   - El split es por DÍAS (columna date). No hay shuffle.
+#   - Si hay NaNs o gaps temporales dentro de una jornada -> FAIL.
 # ============================================================
 
 from __future__ import annotations
 
-import os
+# =========================
+# 1) Imports (ordenados)
+# =========================
+import argparse
 import json
 import logging
+import os
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-
 import yaml
 
-# ----------------------------
-# Logging
-# ----------------------------
+# =========================
+# 2) Logging (uniforme)
+# =========================
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 log = logging.getLogger("stage_05_time_aware_data_splitting")
 
-# ----------------------------
-# MLflow (opcional)
-# ----------------------------
-try:
-    import mlflow  # type: ignore
-except Exception:
-    mlflow = None
+# =========================
+# 3) Configuración DVC-friendly (SIEMPRE presente)
+# =========================
+IN_FEATURES_PARQUET = Path(os.environ.get("IN_FEATURES_PARQUET", "data/features/mnq_features_target.parquet"))
+IN_SCHEMA_SUMMARY = Path(os.environ.get("IN_SCHEMA_SUMMARY", "reports/features_target_summary.json"))
+PARAMS_YAML = Path(os.environ.get("PARAMS_YAML", "params.yaml"))
 
+OUT_TRAIN_PARQUET = Path(os.environ.get("OUT_TRAIN_PARQUET", "data/splits/mnq_train.parquet"))
+OUT_VALID_PARQUET = Path(os.environ.get("OUT_VALID_PARQUET", "data/splits/mnq_valid.parquet"))
+OUT_TEST_PARQUET = Path(os.environ.get("OUT_TEST_PARQUET", "data/splits/mnq_test.parquet"))
+OUT_SPLITS_JSON = Path(os.environ.get("OUT_SPLITS_JSON", "data/splits/splits.json"))
 
-# ============================================================
-# Paths / IO (via env o defaults)
-# ============================================================
-IN_PARQUET = Path(os.environ.get("IN_PARQUET", "data/features/mnq_features_target.parquet"))
-IN_ARTIFACT = Path(os.environ.get("IN_ARTIFACT", "reports/features_target_summary.json"))
+REPORT_SUMMARY = Path(
+    os.environ.get("REPORT_SUMMARY", "reports/stage_05_time_aware_data_splitting_summary.json")
+)
 
-OUT_SPLITS = Path(os.environ.get("OUT_SPLITS", "data/splits/splits.json"))
-OUT_PARQUET_TRAIN = Path(os.environ.get("OUT_PARQUET_TRAIN", "data/splits/mnq_train.parquet"))
-OUT_PARQUET_VALID = Path(os.environ.get("OUT_PARQUET_VALID", "data/splits/mnq_valid.parquet"))
-OUT_PARQUET_TEST = Path(os.environ.get("OUT_PARQUET_TEST", "data/splits/mnq_test.parquet"))
-OUT_SUMMARY = Path(os.environ.get("OUT_SUMMARY", "reports/splits_summary.json"))
-
-# Split ratios (por días)
-TRAIN_RATIO = float(os.environ.get("TRAIN_RATIO", "0.70"))
-VALID_RATIO = float(os.environ.get("VALID_RATIO", "0.15"))
-
-# Validación de gaps
-EXPECTED_GAP_MINUTES = int(os.environ.get("EXPECTED_GAP_MINUTES", "1"))
-
-# MLflow enable flag
+# MLflow flag (opcional)
 ENABLE_MLFLOW = bool(int(os.environ.get("ENABLE_MLFLOW", "0")))
 
 
+# =========================
+# 4) Params (defaults reproducibles)
+# =========================
+@dataclass(frozen=True)
+class Stage05Params:
+    train_ratio: float = 0.70
+    valid_ratio: float = 0.15
+    expected_gap_minutes: int = 1
+
+
+# =========================
+# 5) Utilidades puras
+# =========================
 def _ensure_parent_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def load_yaml(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"No se encontró YAML: {path}")
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
 def save_json(path: Path, payload: Dict[str, Any]) -> None:
     _ensure_parent_dir(path)
-    with open(path, "w", encoding="utf-8") as f:
+    with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
-    log.info("[OK] JSON guardado: %s", path)
 
 
-# ============================================================
-# 1) Carga y preprocesamiento base
-# ============================================================
-def load_mnq_parquet(path: Path = IN_PARQUET) -> pd.DataFrame:
+def load_parquet(path: Path) -> pd.DataFrame:
     if not path.exists():
-        raise FileNotFoundError(f"No se encontró el parquet de entrada: {path}")
-    log.info("[OK] Cargando parquet: %s", path)
+        raise FileNotFoundError(f"No se encontró parquet: {path}")
     return pd.read_parquet(path)
 
 
-def add_column_date(df: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
-    """
-    Asegura DatetimeIndex y agrega columna 'date' (YYYY-MM-DD) para agrupar por jornada.
-    """
+def add_date_column(df: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
     out = df.copy()
     out.index = pd.to_datetime(out.index)
     out[date_col] = out.index.date
-
-    # Reordenar: date primero
     cols = [date_col] + [c for c in out.columns if c != date_col]
     return out[cols]
 
 
-# ============================================================
-# 2) Carga de listado de features y targets (artifact JSON)
-# ============================================================
-def load_features_targets_list(path: Path = IN_ARTIFACT) -> Tuple[List[str], List[str]]:
+def load_features_targets_from_summary(path: Path) -> Tuple[List[str], List[str]]:
     if not path.exists():
-        raise FileNotFoundError(f"No se encontró el artifact de features/targets: {path}")
+        raise FileNotFoundError(f"No se encontró schema summary: {path}")
+    with path.open("r", encoding="utf-8") as f:
+        s = json.load(f)
 
-    log.info("[2] Cargando features/targets desde: %s", path)
-    with open(path, "r", encoding="utf-8") as f:
-        features_target_summary = json.load(f)
+    schema = (s.get("details", {}) or {}).get("schema", {}) or s.get("schema", {})
+    # soporta ambos formatos: envelope (details.schema) o resumen simple (schema)
+    features = schema.get("features", [])
+    targets = schema.get("targets", [])
 
-    features = features_target_summary["schema"]["features"]
-    targets = features_target_summary["schema"]["targets"]
+    if not isinstance(features, list) or not isinstance(targets, list):
+        raise ValueError("schema.features/targets inválidos en el summary de stage_04.")
 
-    log.info("[OK] Features=%d | Targets=%d", len(features), len(targets))
-    return features, targets
+    return list(features), list(targets)
 
 
-# ============================================================
-# 3) Validación dura de NaNs (corta ejecución si existen)
-# ============================================================
-def nan_count(df: pd.DataFrame) -> pd.DataFrame:
+def read_stage05_params(params_yaml: Path) -> Stage05Params:
+    p = load_yaml(params_yaml)
+    s5 = p.get("stage_05", {}) or {}
+    return Stage05Params(
+        train_ratio=float(s5.get("train_ratio", Stage05Params.train_ratio)),
+        valid_ratio=float(s5.get("valid_ratio", Stage05Params.valid_ratio)),
+        expected_gap_minutes=int(s5.get("expected_gap_minutes", Stage05Params.expected_gap_minutes)),
+    )
+
+
+def validate_split_ratios(train_ratio: float, valid_ratio: float) -> float:
+    if not (0.0 < train_ratio < 1.0):
+        raise ValueError("train_ratio inválido. Requiere 0 < train_ratio < 1.")
+    if not (0.0 < valid_ratio < 1.0):
+        raise ValueError("valid_ratio inválido. Requiere 0 < valid_ratio < 1.")
+    if train_ratio + valid_ratio >= 1.0:
+        raise ValueError("Ratios inválidos: train_ratio + valid_ratio debe ser < 1.")
+    return float(1.0 - train_ratio - valid_ratio)
+
+
+def validate_no_nans(df: pd.DataFrame, cols: Sequence[str], date_col: str = "date") -> Dict[str, Any]:
     """
-    Verifica la existencia de NaN por día y por columna.
-    Si detecta algún NaN, loguea el detalle y corta la ejecución del script.
+    Validación dura: no se permiten NaNs en columnas finales.
+    Devuelve stats para reporte si pasa.
     """
-    if "date" not in df.columns:
-        raise ValueError("La columna 'date' no existe. Ejecute add_column_date() antes de validar NaNs.")
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Faltan columnas requeridas para validar NaNs: {missing}")
 
-    log.info("[3.1] Iniciando validación de NaN por día y por columna")
+    # Conteo total
+    total_nans = int(df[cols].isna().sum().sum())
+    if total_nans > 0:
+        # detalle compacto: por columna y por día (top)
+        by_col = df[cols].isna().sum().sort_values(ascending=False)
+        bad_cols = by_col[by_col > 0]
 
-    daily_nan_counts = df.groupby("date").apply(lambda x: x.isna().sum())
-    nan_mask = daily_nan_counts > 0
+        # por día: cantidad total de NaNs en columnas finales
+        per_day = df.groupby(date_col, sort=False)[cols].apply(lambda x: int(x.isna().sum().sum()))
+        per_day = per_day[per_day > 0].sort_values(ascending=False)
 
-    if nan_mask.any().any():
-        log.info("[ERROR] Se detectaron valores NaN en el dataset")
-
-        nan_details = (
-            daily_nan_counts[nan_mask]
-            .stack()
-            .reset_index()
-            .rename(columns={"level_1": "column", 0: "nan_count"})
+        raise RuntimeError(
+            "[ERROR] Se detectaron NaNs en el dataset.\n"
+            f"- total_nans={total_nans}\n"
+            f"- cols_con_nans={bad_cols.to_dict()}\n"
+            f"- days_con_nans_top={per_day.head(10).to_dict()}"
         )
 
-        log.info("[ERROR] Detalle de NaN encontrados (fecha, columna, cantidad):")
-        log.info("\n%s", nan_details.to_string(index=False))
-
-        raise RuntimeError("[ERROR] Ejecución detenida por presencia de NaN en el dataset")
-
-    log.info("[OK] Validación NaN OK: no se encontraron valores faltantes")
-
-    daily_unique_nans = pd.DataFrame(
-        {
-            "feature": daily_nan_counts.columns,
-            "daily_nan_counts": [sorted(daily_nan_counts[col].unique()) for col in daily_nan_counts.columns],
-        }
-    )
-    return daily_unique_nans
+    return {
+        "total_nans": 0,
+        "nan_ratio_total": 0.0,
+    }
 
 
-# ============================================================
-# 4) Validación dura de gaps (corta ejecución si existen)
-# ============================================================
-def detectar_gaps(df: pd.DataFrame, gap_minutes: int = 1) -> None:
+def validate_no_gaps(df: pd.DataFrame, gap_minutes: int, date_col: str = "date") -> Dict[str, Any]:
     """
-    Verifica si existen gaps distintos al intervalo esperado (por defecto 1 minuto)
-    entre registros consecutivos dentro de cada día.
-
-    Si se detectan gaps:
-      - Se loguea el detalle
-      - Se lanza una excepción y se corta la ejecución
-
-    Si no se detectan gaps:
-      - Continúa normalmente
+    Validación dura: dentro de cada día, el diff entre timestamps consecutivos debe ser gap_minutes.
     """
-    log.info("[3.2] Iniciando validación de gaps temporales")
-
     if not isinstance(df.index, pd.DatetimeIndex):
-        raise TypeError("El índice del DataFrame debe ser DatetimeIndex para detectar gaps.")
+        raise TypeError("El índice debe ser DatetimeIndex para validar gaps.")
 
-    work = df.copy()
-    work["time_diff"] = work.index.to_series().diff()
-
-    base_time_diff = pd.Timedelta(minutes=gap_minutes)
+    expected = pd.Timedelta(minutes=int(gap_minutes))
     gap_events: List[Dict[str, Any]] = []
 
-    for day, group in work.groupby(work.index.date):
-        time_diff = group["time_diff"].iloc[1:]  # omitir primer registro del día
-        gaps = time_diff[time_diff != base_time_diff]
-
-        if not gaps.empty:
-            for idx, diff in gaps.items():
-                gap_events.append({"date": str(day), "timestamp": str(idx), "time_diff": str(diff)})
+    # OJO: diff por día (para no contaminar el diff entre días)
+    for day, g in df.groupby(date_col, sort=False):
+        idx = g.index.sort_values()
+        if len(idx) <= 1:
+            continue
+        diffs = idx.to_series().diff().iloc[1:]
+        bad = diffs[diffs != expected]
+        if not bad.empty:
+            for ts, d in bad.items():
+                gap_events.append({"date": str(day), "timestamp": str(ts), "time_diff": str(d)})
 
     if gap_events:
-        log.info("[ERROR] Se detectaron gaps temporales en el dataset")
+        # limitar para no explotar logs
+        preview = gap_events[:50]
+        raise RuntimeError(
+            "[ERROR] Se detectaron gaps temporales.\n"
+            f"- expected={expected}\n"
+            f"- n_gaps={len(gap_events)}\n"
+            f"- preview={preview}"
+        )
 
-        gap_df = pd.DataFrame(gap_events)
-        log.info("[ERROR] Detalle de gaps detectados (fecha, timestamp, diferencia):")
-        log.info("\n%s", gap_df.to_string(index=False))
-
-        raise RuntimeError("[ERROR] Ejecución detenida por detección de gaps temporales en el dataset")
-
-    log.info("[OK] Validación de gaps OK: todas las muestras son consecutivas cada %d minuto(s)", gap_minutes)
+    return {"n_gaps": 0, "expected_gap_minutes": int(gap_minutes)}
 
 
-# ============================================================
-# 5) CARGA DE RATIOS DESDE PARAMS.YAML
-# ============================================================
+def split_days(unique_days: pd.Index, train_ratio: float, valid_ratio: float) -> Tuple[pd.Index, pd.Index, pd.Index]:
+    n_days = int(len(unique_days))
+    if n_days <= 0:
+        raise RuntimeError("No se encontraron días (columna date vacía).")
 
-PARAMS_YAML = Path(os.environ.get("PARAMS_YAML", "params.yaml"))
+    n_train = int(n_days * train_ratio)
+    n_valid = int(n_days * valid_ratio)
+    n_test = n_days - n_train - n_valid
 
-def load_stage05_params(params_path: Path = PARAMS_YAML) -> Tuple[float, float, int]:
-    if not params_path.exists():
-        raise FileNotFoundError(f"No se encontró params.yaml: {params_path}")
+    if n_train <= 0 or n_valid <= 0 or n_test <= 0:
+        raise ValueError(f"Split inválido por cantidad de días: total={n_days}, train={n_train}, valid={n_valid}, test={n_test}")
 
-    with open(params_path, "r", encoding="utf-8") as f:
-        p = yaml.safe_load(f) or {}
+    train_days = unique_days[:n_train]
+    valid_days = unique_days[n_train : n_train + n_valid]
+    test_days = unique_days[n_train + n_valid :]
 
-    s5 = (p.get("stage_05") or {})
-    train_ratio = float(s5.get("train_ratio", 0.70))
-    valid_ratio = float(s5.get("valid_ratio", 0.15))
-    expected_gap_minutes = int(s5.get("expected_gap_minutes", 1))
+    return train_days, valid_days, test_days
 
-    return train_ratio, valid_ratio, expected_gap_minutes
 
-# ============================================================
-# 5) Summary JSON + Pretty logs (stage_05)
-# ============================================================
-def build_splits_json(train_days: pd.Index, val_days: pd.Index, test_days: pd.Index) -> Dict[str, Any]:
+def build_splits_payload(train_days: pd.Index, valid_days: pd.Index, test_days: pd.Index) -> Dict[str, Any]:
     return {
         "train_days": [str(d) for d in train_days],
-        "valid_days": [str(d) for d in val_days],
+        "valid_days": [str(d) for d in valid_days],
         "test_days": [str(d) for d in test_days],
         "n_train_days": int(len(train_days)),
-        "n_valid_days": int(len(val_days)),
+        "n_valid_days": int(len(valid_days)),
         "n_test_days": int(len(test_days)),
     }
 
 
-def build_splits_summary_report(
-    df_in: pd.DataFrame,
-    df_train: pd.DataFrame,
-    df_valid: pd.DataFrame,
-    df_test: pd.DataFrame,
-    features: List[str],
-    targets: List[str],
-    date_col: str = "date",
-    decimals: int = 6,
+def _stats_block(df: pd.DataFrame, date_col: str = "date") -> Dict[str, Any]:
+    n_rows = int(df.shape[0])
+    n_days = int(df[date_col].nunique()) if (date_col in df.columns and n_rows > 0) else 0
+    rows_per_day = float(df.groupby(date_col).size().mean()) if (date_col in df.columns and n_rows > 0) else np.nan
+    return {
+        "n_rows": n_rows,
+        "n_days": n_days,
+        "rows_per_day_mean": None if not np.isfinite(rows_per_day) else round(rows_per_day, 2),
+        "datetime_min": None if n_rows == 0 else str(df.index.min()),
+        "datetime_max": None if n_rows == 0 else str(df.index.max()),
+    }
+
+
+def build_stage05_envelope(
+    *,
+    created_at_utc: str,
+    version: str,
+    paths: Dict[str, Any],
+    params: Dict[str, Any],
+    metrics: Dict[str, Any],
+    details: Dict[str, Any],
 ) -> Dict[str, Any]:
-
-    def _stats(df: pd.DataFrame) -> Dict[str, Any]:
-        n_rows = int(df.shape[0])
-        n_days = int(df[date_col].nunique()) if (date_col in df.columns and n_rows > 0) else 0
-        rows_per_day = float(df.groupby(date_col).size().mean()) if (date_col in df.columns and n_rows > 0) else None
-        dt_min = str(df.index.min()) if n_rows > 0 else None
-        dt_max = str(df.index.max()) if n_rows > 0 else None
-        return {
-            "n_rows": n_rows,
-            "n_days": n_days,
-            "rows_per_day_mean": None if rows_per_day is None else round(rows_per_day, 2),
-            "datetime_min": dt_min,
-            "datetime_max": dt_max,
-        }
-
-    final_cols = [date_col] + features + targets
-
-    def _nan_ratio_map(df: pd.DataFrame) -> Dict[str, float]:
-        cols_existing = [c for c in final_cols if c in df.columns]
-        out = {c: float(df[c].isna().mean()) for c in cols_existing}
-        return {k: round(v, decimals) for k, v in out.items()}
-
-    summary = {
+    return {
         "stage": "stage_05_time_aware_data_splitting",
-        "description": "Split temporal por jornadas (train/valid/test) sin mezcla entre días.",
-        "io": {
-            "in_parquet": str(IN_PARQUET),
-            "in_artifact_features_targets": str(IN_ARTIFACT),
-            "out_train": str(OUT_PARQUET_TRAIN),
-            "out_valid": str(OUT_PARQUET_VALID),
-            "out_test": str(OUT_PARQUET_TEST),
-            "out_splits_json": str(OUT_SPLITS),
-            "out_summary": str(OUT_SUMMARY),
-        },
-        "schema": {
-            "date_col": date_col,
-            "features": features,
-            "targets": targets,
-            "n_features": int(len(features)),
-            "n_targets": int(len(targets)),
-        },
-        "ratios": {
-            "train_ratio": TRAIN_RATIO,
-            "valid_ratio": VALID_RATIO,
-            "test_ratio": round(1.0 - TRAIN_RATIO - VALID_RATIO, 6),
-        },
-        "splits": {
-            "input": _stats(df_in),
-            "train": _stats(df_train),
-            "valid": _stats(df_valid),
-            "test": _stats(df_test),
-        },
-        "nan_ratio_by_col": {
-            "train": _nan_ratio_map(df_train),
-            "valid": _nan_ratio_map(df_valid),
-            "test": _nan_ratio_map(df_test),
-        },
+        "created_at_utc": created_at_utc,
+        "version": version,
+        "paths": paths,
+        "params": params,
+        "metrics": metrics,
+        "details": details,
     }
 
-    return summary
+
+def print_stage_summary_console(envelope: Dict[str, Any]) -> None:
+    m = envelope.get("metrics", {})
+    schema = envelope.get("details", {}).get("schema", {})
+    splits = envelope.get("details", {}).get("splits", {})
+    ratios = envelope.get("params", {}).get("ratios", {})
+
+    print("\n" + "=" * 70)
+    print(f"STAGE: {envelope.get('stage')}")
+    print(f"CREATED_AT_UTC: {envelope.get('created_at_utc')}")
+    print(f"VERSION: {envelope.get('version')}")
+    print("-" * 70)
+
+    # Mostrar features/targets explícitamente
+    features = schema.get("features", [])
+    targets = schema.get("targets", [])
+    print(f"[FEATURES] n={schema.get('n_features')} | {features}")
+    print(f"[TARGETS ] n={schema.get('n_targets')} | {targets}")
+
+    print("-" * 70)
+    print(f"[RATIOS] train={ratios.get('train_ratio')} | valid={ratios.get('valid_ratio')} | test={ratios.get('test_ratio')}")
+    print(f"[GAPS] expected_gap_minutes={m.get('expected_gap_minutes')} | n_gaps={m.get('n_gaps')}")
+    print(f"[NANS] total_nans={m.get('total_nans')}")
+
+    def _one(name: str) -> str:
+        b = splits.get(name, {})
+        return f"{name}: rows={b.get('n_rows')} | days={b.get('n_days')} | dt=[{b.get('datetime_min')} .. {b.get('datetime_max')}]"
+
+    print("-" * 70)
+    print(_one("input"))
+    print(_one("train"))
+    print(_one("valid"))
+    print(_one("test"))
+    print("=" * 70)
 
 
-def print_splits_summary_pretty(summary: Dict[str, Any]) -> None:
-    if not summary:
-        log.info("Summary vacío (stage_05).")
+# =========================
+# 6) MLflow (opcional)
+# =========================
+def mlflow_log_from_envelope(envelope: Dict[str, Any], *, enable: bool, run_name: str, artifacts: Optional[List[str]] = None) -> None:
+    if not enable:
+        log.info("[MLflow] enable=False. Saltando.")
         return
 
-    schema = summary.get("schema", {})
-    splits = summary.get("splits", {})
-    ratios = summary.get("ratios", {})
-
-    log.info("============================================================")
-    log.info("STAGE_05 – TIME AWARE DATA SPLITTING (MNQ)")
-    log.info("============================================================")
-    log.info("Ratios: train=%s | valid=%s | test=%s",
-             ratios.get("train_ratio"), ratios.get("valid_ratio"), ratios.get("test_ratio"))
-    log.info("Features finales (%s): %s", schema.get("n_features", "?"), schema.get("features", []))
-    log.info("Targets finales  (%s): %s", schema.get("n_targets", "?"), schema.get("targets", []))
-
-    for k in ["input", "train", "valid", "test"]:
-        s = splits.get(k, {})
-        log.info("------------------------------------------------------------")
-        log.info("%s", k.upper())
-        log.info("rows=%s | days=%s | rows/day=%s | dt=[%s .. %s]",
-                 s.get("n_rows"), s.get("n_days"), s.get("rows_per_day_mean"),
-                 s.get("datetime_min"), s.get("datetime_max"))
-
-    log.info("============================================================")
-
-
-# ============================================================
-# 6) MLflow helpers (reutilizable)
-# ============================================================
-def build_stage05_mlflow_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
-    schema = summary.get("schema", {})
-    splits = summary.get("splits", {})
-
-    train = splits.get("train", {})
-    valid = splits.get("valid", {})
-    test = splits.get("test", {})
-
-    out = {
-        "params": {
-            "stage": summary.get("stage", "stage_05_time_aware_data_splitting"),
-            "n_features": int(schema.get("n_features", 0)),
-            "n_targets": int(schema.get("n_targets", 0)),
-            "train_ratio": float(summary.get("ratios", {}).get("train_ratio", np.nan)),
-            "valid_ratio": float(summary.get("ratios", {}).get("valid_ratio", np.nan)),
-        },
-        "metrics": {
-            "train_rows": float(train.get("n_rows", np.nan)),
-            "valid_rows": float(valid.get("n_rows", np.nan)),
-            "test_rows": float(test.get("n_rows", np.nan)),
-            "train_days": float(train.get("n_days", np.nan)),
-            "valid_days": float(valid.get("n_days", np.nan)),
-            "test_days": float(test.get("n_days", np.nan)),
-        },
-    }
-    return out
-
-
-def log_mlflow(summary_mlflow: Dict[str, Any], run_name: str, artifacts: List[str] | None = None, enable: bool = True) -> None:
-    if (not enable) or (mlflow is None):
-        log.info("[MLflow] Deshabilitado (ENABLE_MLFLOW=%s) o mlflow no disponible.", enable)
+    try:
+        import mlflow  # type: ignore
+    except Exception:
+        log.info("[MLflow] mlflow no disponible. Saltando.")
         return
+
+    params = envelope.get("params", {})
+    metrics = envelope.get("metrics", {})
 
     with mlflow.start_run(run_name=run_name):
-        # params
-        for k, v in summary_mlflow.get("params", {}).items():
-            try:
+        # params: solo tipos simples
+        def _log_param(k: str, v: Any) -> None:
+            if isinstance(v, (str, int, float, bool)):
                 mlflow.log_param(k, v)
-            except Exception:
-                pass
 
-        # metrics
-        for k, v in summary_mlflow.get("metrics", {}).items():
+        # aplanar ratios
+        ratios = (params.get("ratios", {}) or {})
+        _log_param("train_ratio", ratios.get("train_ratio"))
+        _log_param("valid_ratio", ratios.get("valid_ratio"))
+        _log_param("test_ratio", ratios.get("test_ratio"))
+        _log_param("expected_gap_minutes", params.get("expected_gap_minutes"))
+
+        # métricas numéricas comparables
+        for k, v in metrics.items():
             if isinstance(v, (int, float)) and np.isfinite(v):
                 mlflow.log_metric(k, float(v))
 
@@ -396,109 +369,172 @@ def log_mlflow(summary_mlflow: Dict[str, Any], run_name: str, artifacts: List[st
                 except Exception:
                     pass
 
-    log.info("[MLflow] Run registrado: %s", run_name)
+
+# =========================
+# 7) parse_args (override)
+# =========================
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--in-parquet", default=str(IN_FEATURES_PARQUET))
+    p.add_argument("--in-schema-summary", default=str(IN_SCHEMA_SUMMARY))
+    p.add_argument("--params-yaml", default=str(PARAMS_YAML))
+
+    p.add_argument("--out-train-parquet", default=str(OUT_TRAIN_PARQUET))
+    p.add_argument("--out-valid-parquet", default=str(OUT_VALID_PARQUET))
+    p.add_argument("--out-test-parquet", default=str(OUT_TEST_PARQUET))
+    p.add_argument("--out-splits-json", default=str(OUT_SPLITS_JSON))
+    p.add_argument("--report-summary", default=str(REPORT_SUMMARY))
+
+    p.add_argument("--train-ratio", type=float, default=None)
+    p.add_argument("--valid-ratio", type=float, default=None)
+    p.add_argument("--expected-gap-minutes", type=int, default=None)
+
+    p.add_argument("--enable-mlflow", action="store_true")
+    return p.parse_args()
 
 
-# ============================================================
-# 7) Main
-# ============================================================
+# =========================
+# 8) main (orquestación)
+# =========================
 def main() -> None:
-    # 1) Load
-    log.info("[1] Cargando mnq_features_target.parquet")
-    df_in = load_mnq_parquet(IN_PARQUET)
-    df_in = add_column_date(df_in, date_col="date").sort_index()
+    log.info("[0] Parseando argumentos (CLI/env)")
+    args = parse_args()
 
-    # 2) Load features y targets
-    features, targets = load_features_targets_list(IN_ARTIFACT)
+    in_parquet = Path(args.in_parquet)
+    in_schema = Path(args.in_schema_summary)
+    params_yaml = Path(args.params_yaml)
 
-    # 3) Validaciones duras
-    train_ratio, valid_ratio, expected_gap_minutes = load_stage05_params()
+    out_train = Path(args.out_train_parquet)
+    out_valid = Path(args.out_valid_parquet)
+    out_test = Path(args.out_test_parquet)
+    out_splits = Path(args.out_splits_json)
+    report_summary = Path(args.report_summary)
 
-    
-    log.info("[3] Validaciones (NaNs + gaps)")
-    nan_count(df_in)
-    detectar_gaps(df_in, gap_minutes=expected_gap_minutes)
+    # Params desde params.yaml (y override si viene por CLI)
+    log.info("[1] Leyendo params stage_05 desde: %s", params_yaml)
+    p = read_stage05_params(params_yaml)
 
-    # 4) Split por días
-       
-    log.info("[4] Generando split temporal por días")
+    train_ratio = float(args.train_ratio) if args.train_ratio is not None else p.train_ratio
+    valid_ratio = float(args.valid_ratio) if args.valid_ratio is not None else p.valid_ratio
+    expected_gap_minutes = int(args.expected_gap_minutes) if args.expected_gap_minutes is not None else p.expected_gap_minutes
+    test_ratio = validate_split_ratios(train_ratio, valid_ratio)
+
+    log.info("[2] Cargando dataset features/targets: %s", in_parquet)
+    df_in = load_parquet(in_parquet)
+    df_in = add_date_column(df_in, date_col="date").sort_index()
+
+    log.info("[3] Cargando schema (features/targets) desde: %s", in_schema)
+    features, targets = load_features_targets_from_summary(in_schema)
+
+    final_cols = ["date"] + features + targets
+
+    log.info("[4] Validaciones duras (NaNs + gaps)")
+    nan_stats = validate_no_nans(df_in, cols=final_cols, date_col="date")
+    gap_stats = validate_no_gaps(df_in, gap_minutes=expected_gap_minutes, date_col="date")
+
+    log.info("[5] Split temporal por días (sin shuffle)")
     unique_days = pd.Index(sorted(df_in["date"].unique()))
-    num_dias = len(unique_days)
+    train_days, valid_days, test_days = split_days(unique_days, train_ratio=train_ratio, valid_ratio=valid_ratio)
 
-
-
-    if num_dias <= 0:
-        raise RuntimeError("[ERROR] No se encontraron días en el dataset (columna 'date' vacía).")
-
-    if not (0.0 < train_ratio < 1.0) or not (0.0 < valid_ratio < 1.0) or (train_ratio + valid_ratio >= 1.0):
-        raise ValueError("[ERROR] train_ratio y valid_ratio inválidos. Requiere: 0<train<1, 0<valid<1, train+valid<1.")
-
-    
-    
-    n_train = int(num_dias * train_ratio)
-    n_valid = int(num_dias * valid_ratio)
-    n_test = num_dias - n_train - n_valid
-
-    # Seguridad mínima
-    if n_train <= 0 or n_valid <= 0 or n_test <= 0:
-        raise ValueError(
-            f"[ERROR] Split inválido por cantidad de días. total={num_dias}, train={n_train}, valid={n_valid}, test={n_test}."
-        )
-
-    log.info("[OK] Días totales=%d | train=%d | valid=%d | test=%d", num_dias, n_train, n_valid, n_test)
-
-    train_days = unique_days[:n_train]
-    val_days = unique_days[n_train:n_train + n_valid]
-    test_days = unique_days[n_train + n_valid:]
-
-    # 5) Construir datasets
-    log.info("[5] Construyendo datasets train/valid/test")
     df_train = df_in[df_in["date"].isin(train_days)].copy().sort_index()
-    df_valid = df_in[df_in["date"].isin(val_days)].copy().sort_index()
+    df_valid = df_in[df_in["date"].isin(valid_days)].copy().sort_index()
     df_test = df_in[df_in["date"].isin(test_days)].copy().sort_index()
 
-    # 6) Guardar outputs parquet + splits.json
-    log.info("[6] Guardando outputs parquet + splits.json")
-    _ensure_parent_dir(OUT_PARQUET_TRAIN)
-    _ensure_parent_dir(OUT_PARQUET_VALID)
-    _ensure_parent_dir(OUT_PARQUET_TEST)
+    log.info("[6] Guardando parquets train/valid/test")
+    _ensure_parent_dir(out_train)
+    _ensure_parent_dir(out_valid)
+    _ensure_parent_dir(out_test)
+    df_train.to_parquet(out_train, index=True)
+    df_valid.to_parquet(out_valid, index=True)
+    df_test.to_parquet(out_test, index=True)
 
-    df_train.to_parquet(OUT_PARQUET_TRAIN, index=True)
-    df_valid.to_parquet(OUT_PARQUET_VALID, index=True)
-    df_test.to_parquet(OUT_PARQUET_TEST, index=True)
+    log.info("[7] Guardando splits.json (artifact operativo)")
+    splits_payload = build_splits_payload(train_days, valid_days, test_days)
+    save_json(out_splits, splits_payload)
 
-    log.info("[OK] Guardado train: %s", OUT_PARQUET_TRAIN)
-    log.info("[OK] Guardado valid: %s", OUT_PARQUET_VALID)
-    log.info("[OK] Guardado test : %s", OUT_PARQUET_TEST)
+    # Envelope summary
+    log.info("[8] Construyendo report summary (envelope estándar)")
+    created_at_utc = _utc_now_iso()
 
-    splits_payload = build_splits_json(train_days, val_days, test_days)
-    save_json(OUT_SPLITS, splits_payload)
+    paths = {
+        "inputs": {
+            "features_parquet": str(in_parquet),
+            "schema_summary": str(in_schema),
+            "params_yaml": str(params_yaml),
+        },
+        "outputs": {
+            "train_parquet": str(out_train),
+            "valid_parquet": str(out_valid),
+            "test_parquet": str(out_test),
+            "splits_json": str(out_splits),
+        },
+        "reports": {
+            "summary": str(report_summary),
+        },
+    }
 
-    # 7) Summary JSON + pretty logs
-    log.info("[7] Generando summary (JSON) y pretty logs")
-    summary = build_splits_summary_report(
-        df_in=df_in,
-        df_train=df_train,
-        df_valid=df_valid,
-        df_test=df_test,
-        features=features,
-        targets=targets,
-        date_col="date",
+    params_block = {
+        "ratios": {
+            "train_ratio": train_ratio,
+            "valid_ratio": valid_ratio,
+            "test_ratio": round(test_ratio, 6),
+        },
+        "expected_gap_minutes": expected_gap_minutes,
+    }
+
+    details = {
+        "schema": {
+            "date_col": "date",
+            "features": features,
+            "targets": targets,
+            "n_features": int(len(features)),
+            "n_targets": int(len(targets)),
+        },
+        "splits": {
+            "input": _stats_block(df_in, date_col="date"),
+            "train": _stats_block(df_train, date_col="date"),
+            "valid": _stats_block(df_valid, date_col="date"),
+            "test": _stats_block(df_test, date_col="date"),
+        },
+        "split_days": splits_payload,
+    }
+
+    metrics = {
+        "n_rows_in": float(df_in.shape[0]),
+        "n_rows_train": float(df_train.shape[0]),
+        "n_rows_valid": float(df_valid.shape[0]),
+        "n_rows_test": float(df_test.shape[0]),
+        "n_days_in": float(df_in["date"].nunique()),
+        "n_days_train": float(df_train["date"].nunique()),
+        "n_days_valid": float(df_valid["date"].nunique()),
+        "n_days_test": float(df_test["date"].nunique()),
+        "total_nans": float(nan_stats.get("total_nans", np.nan)),
+        "n_gaps": float(gap_stats.get("n_gaps", np.nan)),
+        "expected_gap_minutes": float(expected_gap_minutes),
+    }
+
+    envelope = build_stage05_envelope(
+        created_at_utc=created_at_utc,
+        version="1.0",
+        paths=paths,
+        params=params_block,
+        metrics=metrics,
+        details=details,
     )
-    save_json(OUT_SUMMARY, summary)
-    print_splits_summary_pretty(summary)
 
-    # 8) MLflow (opcional)
-    log.info("[8] MLflow (opcional)")
-    mlflow_summary = build_stage05_mlflow_summary(summary)
-    log_mlflow(
-        summary_mlflow=mlflow_summary,
+    save_json(report_summary, envelope)
+    print_stage_summary_console(envelope)
+
+    # MLflow (opcional)
+    log.info("[9] MLflow tracking (enable=%s)", bool(args.enable_mlflow or ENABLE_MLFLOW))
+    mlflow_log_from_envelope(
+        envelope,
+        enable=bool(args.enable_mlflow or ENABLE_MLFLOW),
         run_name="stage_05_time_aware_data_splitting",
-        artifacts=[str(OUT_SUMMARY), str(OUT_SPLITS)],
-        enable=ENABLE_MLFLOW,
+        artifacts=[str(report_summary), str(out_splits)],
     )
 
-    log.info("[DONE] Stage_05 finalizado correctamente.")
+    log.info("[DONE] stage_05_time_aware_data_splitting finalizado correctamente.")
 
 
 if __name__ == "__main__":

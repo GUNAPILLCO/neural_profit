@@ -1,68 +1,80 @@
 """
-stage_00_raw_data_ingestion
+stage_00_raw_data_ingestion.py
 
-Descripción:
-Ingesta y consolidación de los archivos históricos crudos de MNQ
-en un único dataset estructurado, SIN aplicar filtros ni transformaciones
-de negocio (horarios, calendarios, limpieza intradía, etc.).
+Contrato del Stage
+------------------
+Propósito:
+- Ingesta y consolidación de archivos históricos crudos de MNQ (.txt) en un único
+  dataset estructurado, SIN aplicar filtros ni transformaciones de negocio.
 
-Este stage define el "raw truth" del proyecto.
+Inputs (deps DVC):
+- data/source/*.txt
 
-Input:
-- data/source/*.txt   (archivos históricos crudos)
-
-Output:
+Outputs (outs DVC):
 - data/raw/mnq_raw.parquet
 
-Artefactos:
-- reports/ingest_summary.json
+Reports (auditoría):
+- reports/stage_00_ingest_summary.json
+
+Params:
+- SOURCE_DIR, OUT_PARQUET, REPORT_SUMMARY (paths DVC-friendly; env-first; CLI override)
+- DATETIME_FORMAT, SEP, DTYPES, COLS (formato de los .txt)
+
+Notas:
+- El report JSON (summary envelope) es la fuente de verdad del stage.
+- MLflow: se loguean params/metrics y se adjunta el JSON como artifact (REQUERIDO en este stage).
 """
 
-# ---------------------------------------------------------------------
-# Imports estándar
-# ---------------------------------------------------------------------
+from __future__ import annotations
 
-from __future__ import annotations  # permite type hints modernos (Python < 3.11)
-import json                         # para guardar el summary como JSON
-import os                           # para leer variables de entorno
-from pathlib import Path            # manejo robusto de rutas
-import pandas as pd                 # procesamiento de datos
+# ---------------------------------------------------------------------
+# Imports (stdlib)
+# ---------------------------------------------------------------------
+import argparse
 import hashlib
+import json
+import os
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 import logging
 
+# ---------------------------------------------------------------------
+# Imports (third-party)
+# ---------------------------------------------------------------------
+import pandas as pd
+
+
+# ---------------------------------------------------------------------
+# Logging (uniforme)
+# ---------------------------------------------------------------------
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 log = logging.getLogger("stage_00")
 
-# ---------------------------------------------------------------------
-# Configuración de rutas (DVC-friendly)
-# ---------------------------------------------------------------------
-# Estas rutas son RELATIVAS al repositorio.
-# DVC necesita paths locales y determinísticos.
-# Si mañana quiere apuntar a Drive, se hace vía DVC remote o symlink,
-# NO cambiando la lógica del stage.
 
-SOURCE_DIR = Path(os.environ.get("SOURCE_DIR", "data/source"))
+# ---------------------------------------------------------------------
+# Configuración de rutas (DVC-friendly) - SIEMPRE PRESENTE
+# ---------------------------------------------------------------------
+IN_SOURCE_DIR = Path(os.environ.get("SOURCE_DIR", "data/source"))
 OUT_PARQUET = Path(os.environ.get("OUT_PARQUET", "data/raw/mnq_raw.parquet"))
-OUT_SUMMARY = Path(os.environ.get("OUT_SUMMARY", "reports/stage_00_ingest_summary.json"))
+REPORT_SUMMARY = Path(os.environ.get("REPORT_SUMMARY", "reports/stage_00_ingest_summary.json"))
 
 
 # ---------------------------------------------------------------------
-# Configuración del formato de los datos crudos
+# Configuración funcional (params reproducibles) - SIEMPRE PRESENTE
 # ---------------------------------------------------------------------
+STAGE_NAME = "stage_00_raw_data_ingestion"
+STAGE_VERSION = "1.0"
 
-# Formato exacto del datetime según sus .txt
-# Ejemplo: 20200102 083000
-DATETIME_FORMAT = "%Y%m%d %H%M%S"
-
-# Separador de los archivos .txt
-SEP = ";"
+DATETIME_FORMAT = os.environ.get("DATETIME_FORMAT", "%Y%m%d %H%M%S")
+SEP = os.environ.get("SEP", ";")
 
 # Tipos de datos explícitos (evita inferencias inconsistentes)
-DTYPES = {
+DTYPES: Dict[str, str] = {
     "open": "float64",
     "high": "float64",
     "low": "float64",
@@ -71,269 +83,307 @@ DTYPES = {
 }
 
 # Orden y nombres esperados de las columnas en los .txt
-COLS = ["datetime", "open", "high", "low", "close", "volume"]
+COLS: List[str] = ["datetime", "open", "high", "low", "close", "volume"]
 
 
 # ---------------------------------------------------------------------
-# 1) Función principal de ingesta (equivalente a su notebook generar_df)
+# Utilidades generales (reusables)
+# ---------------------------------------------------------------------
+def _ensure_parent_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def save_json(payload: Dict[str, Any], output_path: Path) -> None:
+    _ensure_parent_dir(output_path)
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def build_summary_envelope(
+    *,
+    stage: str,
+    version: str,
+    inputs: Dict[str, str],
+    outputs: Dict[str, str],
+    reports: Dict[str, str],
+    params: Dict[str, Any],
+    metrics: Dict[str, float],
+    details: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "stage": stage,
+        "created_at_utc": _utc_now_iso(),
+        "version": version,
+        "paths": {
+            "inputs": inputs,
+            "outputs": outputs,
+            "reports": reports,
+        },
+        "params": params or {},
+        "metrics": metrics or {},
+        "details": details or {},
+    }
+
+
+def print_summary_console(summary: Dict[str, Any]) -> None:
+    def _fmt(x: Any) -> str:
+        return "N/A" if x is None else str(x)
+
+    print("\n" + "=" * 70)
+    print(f"STAGE: {_fmt(summary.get('stage'))}")
+    print(f"CREATED_AT_UTC: {_fmt(summary.get('created_at_utc'))}")
+    print(f"VERSION: {_fmt(summary.get('version'))}")
+    print("-" * 70)
+
+    print("[PATHS]")
+    paths = summary.get("paths", {}) or {}
+    for group in ("inputs", "outputs", "reports"):
+        print(f"  {group}:")
+        for k, v in (paths.get(group, {}) or {}).items():
+            print(f"    - {k}: {v}")
+
+    print("[PARAMS]")
+    for k, v in (summary.get("params", {}) or {}).items():
+        print(f"  - {k}: {v}")
+
+    print("[METRICS]")
+    for k, v in (summary.get("metrics", {}) or {}).items():
+        print(f"  - {k}: {v}")
+
+    print("=" * 70 + "\n")
+
+
+def mlflow_log_from_summary(
+    *,
+    stage: str,
+    summary: Dict[str, Any],
+    summary_path: Path,
+    run_name: Optional[str] = None,
+    tags: Optional[Dict[str, str]] = None,
+) -> None:
+    """
+    MLflow REQUIRED en este stage: si no está instalado, el stage falla.
+    Loguea:
+      - params: summary["params"]
+      - metrics: summary["metrics"]
+      - artifact: JSON summary
+    """
+    try:
+        import mlflow
+    except ImportError as exc:
+        raise ImportError("MLflow es requerido en stage_00. Instale con: pip install mlflow") from exc
+
+    if run_name is None:
+        run_name = stage
+
+    with mlflow.start_run(run_name=run_name):
+        mlflow.set_tag("stage", stage)
+        if tags:
+            for k, v in tags.items():
+                mlflow.set_tag(k, v)
+
+        for k, v in (summary.get("params", {}) or {}).items():
+            mlflow.log_param(k, v)
+
+        for k, v in (summary.get("metrics", {}) or {}).items():
+            if isinstance(v, (int, float)) and v == v:  # evita NaN
+                mlflow.log_metric(k, float(v))
+
+        mlflow.log_artifact(str(summary_path))
+
+
+# ---------------------------------------------------------------------
+# Core stage functions (puras)
 # ---------------------------------------------------------------------
 def generate_df(
     source_dir: Path,
-    ) -> tuple[pd.DataFrame, dict, dict, int]:
+    *,
+    sep: str,
+    datetime_format: str,
+    cols: List[str],
+    dtypes: Dict[str, str],
+) -> Tuple[pd.DataFrame, List[Path], Dict[str, int], Dict[str, int], int]:
     """
-    Lee todos los archivos .txt desde source_dir, los concatena,
-    parsea el datetime y devuelve:
+    Lee todos los archivos .txt desde source_dir, concatena, parsea datetime y devuelve:
 
-    - df_mnq_raw
+    - df_mnq_raw (DatetimeIndex)
+    - files (Paths ingeridos)
     - per_file_rows_read
     - per_file_invalid_datetime_dropped
     - invalid_datetime_dropped_total
     """
-
     files = sorted(source_dir.glob("*.txt"))
-
     if not files:
-        raise FileNotFoundError(
-            f"No se encontraron archivos históricos en: {source_dir}"
-        )
+        raise FileNotFoundError(f"No se encontraron archivos históricos en: {source_dir}")
 
-    dfs: list[pd.DataFrame] = []
-
-    per_file_rows_read: dict[str, int] = {}
-    per_file_invalid_datetime_dropped: dict[str, int] = {}
+    dfs: List[pd.DataFrame] = []
+    per_file_rows_read: Dict[str, int] = {}
+    per_file_invalid_datetime_dropped: Dict[str, int] = {}
     invalid_datetime_dropped_total: int = 0
 
     for archivo in files:
-        # Leer crudo
         df = pd.read_csv(
             archivo,
-            sep=SEP,
+            sep=sep,
             header=None,
-            names=COLS,
-            dtype=DTYPES,
+            names=cols,
+            dtype=dtypes,
         )
 
-        rows_read = len(df)
+        rows_read = int(len(df))
 
-        # Parseo datetime
         df["datetime"] = pd.to_datetime(
             df["datetime"],
-            format=DATETIME_FORMAT,
+            format=datetime_format,
             errors="coerce",
         )
 
         invalid_dt = int(df["datetime"].isna().sum())
-
-        # Drop filas inválidas
         df = df.dropna(subset=["datetime"])
-
-        # Set index temporal
         df = df.set_index("datetime")
 
-        # Acumuladores
         per_file_rows_read[archivo.name] = rows_read
         per_file_invalid_datetime_dropped[archivo.name] = invalid_dt
         invalid_datetime_dropped_total += invalid_dt
 
         dfs.append(df)
 
-    # Consolidación
     df_mnq_raw = pd.concat(dfs)
     df_mnq_raw.sort_index(inplace=True)
 
+    # Validación mínima: índice temporal
+    if not isinstance(df_mnq_raw.index, pd.DatetimeIndex):
+        raise TypeError("El dataset consolidado no tiene DatetimeIndex tras la ingesta.")
+
     return (
         df_mnq_raw,
+        files,
         per_file_rows_read,
         per_file_invalid_datetime_dropped,
         invalid_datetime_dropped_total,
     )
 
 
-# ---------------------------------------------------------------------
-# Artefacto: resumen de ingesta (metrics livianas)
-# ---------------------------------------------------------------------
-def build_stage_00_summary(
+def compute_stage_00_metrics_details(
     df: pd.DataFrame,
     files: List[Path],
     *,
     source_dir: Path,
     out_parquet: Path,
-    out_summary: Path,
-    datetime_format: str,
+    report_summary: Path,
     sep: str,
-    invalid_datetime_dropped_total: int = 0,
-    per_file_rows_read: Optional[Dict[str, int]] = None,
-    per_file_invalid_datetime_dropped: Optional[Dict[str, int]] = None,
-) -> Dict[str, Any]:
+    datetime_format: str,
+    cols: List[str],
+    per_file_rows_read: Dict[str, int],
+    per_file_invalid_datetime_dropped: Dict[str, int],
+    invalid_datetime_dropped_total: int,
+) -> Tuple[Dict[str, float], Dict[str, Any]]:
     """
-    Genera un summary enriquecido de la ingesta RAW (stage_00).
-
-    - No aplica transformaciones de negocio.
-    - El objetivo es auditoría / trazabilidad (metrics livianas).
-    - Todo lo devuelto es JSON-serializable.
-
-    Parámetros:
-      df: DataFrame final consolidado (index datetime).
-      files: lista de Paths a los .txt ingeridos (en orden).
-      source_dir, out_parquet, out_summary: rutas usadas por el stage.
-      datetime_format, sep: parámetros de parseo de crudos.
-      invalid_datetime_dropped_total: conteo total de filas descartadas por datetime inválido.
-      per_file_rows_read: dict opcional {filename: rows_leidas}
-      per_file_invalid_datetime_dropped: dict opcional {filename: drops_datetime_invalido}
-
-    Devuelve:
-      summary: dict listo para guardarse como JSON.
+    Calcula metrics (numéricas) y details (libre) para el summary envelope.
     """
-
-    def _iso_utc_now() -> str:
-        return datetime.now(timezone.utc).isoformat()
-
-    def _safe_float(x) -> Optional[float]:
-        if x is None:
-            return None
-        try:
-            if pd.isna(x):
-                return None
-            return float(x)
-        except Exception:
-            return None
-
-    def _safe_int(x) -> int:
-        try:
-            return int(x)
-        except Exception:
-            return 0
-
-    def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(chunk_size), b""):
-                h.update(chunk)
-        return h.hexdigest()
-
-    # -----------------------------
-    # Checks básicos del índice
-    # -----------------------------
     idx = df.index
-    if not isinstance(idx, pd.DatetimeIndex):
-        raise TypeError("build_stage_00_summary espera df.index como pd.DatetimeIndex")
-
     n_rows_total = int(len(df))
-    min_dt = idx.min()
-    max_dt = idx.max()
 
     is_monotonic = bool(idx.is_monotonic_increasing)
     n_duplicates = int(idx.duplicated().sum())
 
-    # Cantidad de días (por fecha calendario) presentes en el RAW
-    # (en RAW no asumimos sesión; es un conteo de fechas)
-    n_days = int(pd.Series(idx.date).nunique()) if n_rows_total > 0 else 0
+    min_dt = idx.min()
+    max_dt = idx.max()
 
-    # -----------------------------
-    # Frecuencia / gaps (sin filtrar)
-    # -----------------------------
+    n_days = int(pd.Series(idx.date).nunique()) if n_rows_total else 0
+
+    # Timing diagnostics
+    median_step_seconds = None
+    p95_step_seconds = None
+    max_gap_seconds = None
+    pct_step_60s = None
     if n_rows_total >= 2:
         diffs = pd.Series(idx).diff().dropna()
         diffs_s = diffs.dt.total_seconds().astype("float64")
+        median_step_seconds = float(diffs_s.median())
+        p95_step_seconds = float(diffs_s.quantile(0.95))
+        max_gap_seconds = float(diffs_s.max())
+        pct_step_60s = float((diffs_s == 60.0).mean())
 
-        median_step_seconds = _safe_float(diffs_s.median())
-        p95_step_seconds = _safe_float(diffs_s.quantile(0.95))
-        max_gap_seconds = _safe_float(diffs_s.max())
+    # Data quality
+    null_ratio_by_col: Dict[str, float] = {c: float(df[c].isna().mean()) for c in df.columns}
 
-        # Un extra útil: % de pasos = 60s (si esperas 1-min)
-        pct_step_60s = _safe_float((diffs_s == 60.0).mean())
-    else:
-        median_step_seconds = None
-        p95_step_seconds = None
-        max_gap_seconds = None
-        pct_step_60s = None
-
-    # -----------------------------
-    # Calidad por columna (NaN ratios)
-    # -----------------------------
-    null_ratio_by_col: Dict[str, float] = {}
-    for c in df.columns:
-        null_ratio_by_col[c] = float(df[c].isna().mean()) if n_rows_total else 0.0
-
-    # -----------------------------
-    # Rangos por columna (min/max)
-    # -----------------------------
     col_minmax: Dict[str, Dict[str, Optional[float]]] = {}
     for c in df.columns:
         if pd.api.types.is_numeric_dtype(df[c]):
+            mn = df[c].min(skipna=True)
+            mx = df[c].max(skipna=True)
             col_minmax[c] = {
-                "min": _safe_float(df[c].min(skipna=True)),
-                "max": _safe_float(df[c].max(skipna=True)),
+                "min": None if pd.isna(mn) else float(mn),
+                "max": None if pd.isna(mx) else float(mx),
             }
         else:
             col_minmax[c] = {"min": None, "max": None}
 
-    # -----------------------------
-    # Conteos de valores inválidos
-    # -----------------------------
     price_cols = [c for c in ["open", "high", "low", "close"] if c in df.columns]
-    non_positive_prices_count = 0
-    if price_cols:
-        # Cuenta filas donde alguna price <= 0 (ignorando NaNs)
-        non_positive_prices_count = int((df[price_cols] <= 0).any(axis=1).sum())
+    non_positive_prices_count = int((df[price_cols] <= 0).any(axis=1).sum()) if price_cols else 0
 
     negative_volume_count = 0
     if "volume" in df.columns and pd.api.types.is_numeric_dtype(df["volume"]):
         negative_volume_count = int((df["volume"] < 0).sum())
 
-    # -----------------------------
-    # Resumen por archivo
-    # -----------------------------
+    # Per-file summaries
     file_summaries: List[Dict[str, Any]] = []
     for p in files:
         name = p.name
-        rows_read = per_file_rows_read.get(name) if per_file_rows_read else None
-        drops_bad_dt = (
-            per_file_invalid_datetime_dropped.get(name)
-            if per_file_invalid_datetime_dropped
-            else None
-        )
-
-        entry: Dict[str, Any] = {
+        entry = {
             "name": name,
             "path": str(p.as_posix()),
-            "size_bytes": _safe_int(p.stat().st_size) if p.exists() else 0,
+            "size_bytes": int(p.stat().st_size) if p.exists() else 0,
             "sha256": _sha256_file(p) if p.exists() else None,
-            "rows_read": rows_read,
-            "invalid_datetime_dropped": drops_bad_dt,
+            "rows_read": int(per_file_rows_read.get(name, 0)),
+            "invalid_datetime_dropped": int(per_file_invalid_datetime_dropped.get(name, 0)),
         }
         file_summaries.append(entry)
 
-    # -----------------------------
-    # Summary final
-    # -----------------------------
-    summary: Dict[str, Any] = {
-        "stage": "stage_00_raw_data_ingestion",
-        "created_at_utc": _iso_utc_now(),
-        "paths": {
-            "source_dir": str(source_dir.as_posix()),
-            "out_parquet": str(out_parquet.as_posix()),
-            "out_summary": str(out_summary.as_posix()),
-        },
-        "raw_format": {
-            "datetime_format": datetime_format,
-            "sep": sep,
-            "expected_columns": list(df.columns),
-            "index_name": str(df.index.name),
-        },
-        "ingestion": {
-            "n_files": int(len(files)),
-            "n_rows_total": n_rows_total,
-            "invalid_datetime_dropped_total": int(invalid_datetime_dropped_total),
-        },
+    # ---- params (config reproducible; lo arma main, aquí solo details/metrics) ----
+    metrics: Dict[str, float] = {
+        "n_files": float(len(files)),
+        "n_rows_total": float(n_rows_total),
+        "n_days": float(n_days),
+        "invalid_datetime_dropped_total": float(invalid_datetime_dropped_total),
+        "index_is_monotonic_increasing": float(1.0 if is_monotonic else 0.0),
+        "n_duplicates": float(n_duplicates),
+        "median_step_seconds": float(median_step_seconds) if median_step_seconds is not None else float("nan"),
+        "p95_step_seconds": float(p95_step_seconds) if p95_step_seconds is not None else float("nan"),
+        "max_gap_seconds": float(max_gap_seconds) if max_gap_seconds is not None else float("nan"),
+        "pct_step_60s": float(pct_step_60s) if pct_step_60s is not None else float("nan"),
+        "non_positive_prices_count": float(non_positive_prices_count),
+        "negative_volume_count": float(negative_volume_count),
+    }
+
+    details: Dict[str, Any] = {
         "time_coverage": {
             "min_datetime": str(min_dt) if min_dt is not pd.NaT else None,
             "max_datetime": str(max_dt) if max_dt is not pd.NaT else None,
-            "n_days": n_days,
         },
         "index_integrity": {
             "is_monotonic_increasing": is_monotonic,
             "n_duplicates": n_duplicates,
+        },
+        "raw_format": {
+            "datetime_format": datetime_format,
+            "sep": sep,
+            "expected_columns": cols,
+            "output_columns": list(df.columns),
+            "index_name": str(df.index.name),
         },
         "timing_diagnostics": {
             "median_step_seconds": median_step_seconds,
@@ -344,192 +394,139 @@ def build_stage_00_summary(
         "data_quality": {
             "null_ratio_by_col": null_ratio_by_col,
             "col_minmax": col_minmax,
-            "non_positive_prices_count": int(non_positive_prices_count),
-            "negative_volume_count": int(negative_volume_count),
+            "non_positive_prices_count": non_positive_prices_count,
+            "negative_volume_count": negative_volume_count,
         },
         "files": file_summaries,
+        "io": {
+            "source_dir": str(source_dir.as_posix()),
+            "out_parquet": str(out_parquet.as_posix()),
+            "report_summary": str(report_summary.as_posix()),
+        },
     }
 
-    # Guardado (carpeta reports/)
-    out_summary.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_summary, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
-
-    return summary
-
-
-def print_stage_00_summary_console(summary: dict) -> None:
-    """
-    Imprime en consola un resumen legible del stage_00_ingest_summary.json.
-    Pensado para logs de terminal / CI.
-    """
-
-    def _fmt(x):
-        return "N/A" if x is None else x
-
-    print("\n" + "=" * 70)
-    print(f"STAGE: {summary.get('stage')}")
-    print(f"CREATED_AT (UTC): {summary.get('created_at_utc')}")
-    print("=" * 70)
-
-    # -----------------------------
-    # Paths
-    # -----------------------------
-    paths = summary.get("paths", {})
-    print("\n[PATHS]")
-    for k, v in paths.items():
-        print(f"  - {k}: {v}")
-
-    # -----------------------------
-    # Ingestion
-    # -----------------------------
-    ingestion = summary.get("ingestion", {})
-    print("\n[INGESTION]")
-    print(f"  Files ingested        : {ingestion.get('n_files')}")
-    print(f"  Total rows            : {ingestion.get('n_rows_total')}")
-    print(
-        f"  Invalid datetime drop : {ingestion.get('invalid_datetime_dropped_total')}"
-    )
-
-    # -----------------------------
-    # Time coverage
-    # -----------------------------
-    time_cov = summary.get("time_coverage", {})
-    print("\n[TIME COVERAGE]")
-    print(f"  From : {time_cov.get('min_datetime')}")
-    print(f"  To   : {time_cov.get('max_datetime')}")
-    print(f"  Days : {time_cov.get('n_days')}")
-
-    # -----------------------------
-    # Index integrity
-    # -----------------------------
-    idx = summary.get("index_integrity", {})
-    print("\n[INDEX INTEGRITY]")
-    print(f"  Monotonic increasing : {idx.get('is_monotonic_increasing')}")
-    print(f"  Duplicated timestamps: {idx.get('n_duplicates')}")
-
-    # -----------------------------
-    # Timing diagnostics
-    # -----------------------------
-    timing = summary.get("timing_diagnostics", {})
-    print("\n[TIMING DIAGNOSTICS]")
-    print(f"  Median step (s) : {_fmt(timing.get('median_step_seconds'))}")
-    print(f"  P95 step (s)    : {_fmt(timing.get('p95_step_seconds'))}")
-    print(f"  Max gap (s)     : {_fmt(timing.get('max_gap_seconds'))}")
-    print(f"  % step = 60s    : {_fmt(timing.get('pct_step_60s'))}")
-
-    # -----------------------------
-    # Data quality
-    # -----------------------------
-    dq = summary.get("data_quality", {})
-    print("\n[DATA QUALITY]")
-    print("  Null ratio by column:")
-    for col, ratio in dq.get("null_ratio_by_col", {}).items():
-        print(f"    - {col:<6}: {ratio:.4%}")
-
-    print(
-        f"  Non-positive prices count : {dq.get('non_positive_prices_count')}"
-    )
-    print(
-        f"  Negative volume count     : {dq.get('negative_volume_count')}"
-    )
-
-    # -----------------------------
-    # Files
-    # -----------------------------
-    print("\n[FILES]")
-    for f in summary.get("files", []):
-        print(f"  - {f.get('name')}")
-        #print(f"      rows_read                 : {_fmt(f.get('rows_read'))}")
-        #print(
-        #    f"      invalid_datetime_dropped  : {_fmt(f.get('invalid_datetime_dropped'))}"
-        #)
-        #print(f"      size_bytes                : {_fmt(f.get('size_bytes'))}")
-        #print(f"      sha256                    : {_fmt(f.get('sha256'))}")
-
-    print("\n" + "=" * 70 + "\n")
+    return metrics, details
 
 
 # ---------------------------------------------------------------------
-# Entry point del stage (lo que ejecuta DVC)
+# CLI (argparse) - override (no inventa defaults)
+# ---------------------------------------------------------------------
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Stage_00: Raw data ingestion (MNQ).")
+
+    parser.add_argument("--source-dir", type=str, default=str(IN_SOURCE_DIR))
+    parser.add_argument("--out-parquet", type=str, default=str(OUT_PARQUET))
+    parser.add_argument("--report-summary", type=str, default=str(REPORT_SUMMARY))
+
+    parser.add_argument("--datetime-format", type=str, default=DATETIME_FORMAT)
+    parser.add_argument("--sep", type=str, default=SEP)
+
+    return parser.parse_args()
+
+
+# ---------------------------------------------------------------------
+# Main (orquestación)
 # ---------------------------------------------------------------------
 def main() -> None:
-    """
-    Punto de entrada del stage_00.
-    DVC ejecuta esta función vía:
-        dvc repro
-    """
+    log.info("[0] Parseando argumentos (CLI/env)")
+    args = parse_args()
 
-    # Verificación temprana: ¿hay archivos fuente?
-    log.info(f"[1] Leyendo archivos .txt")
-    
-    files = sorted(SOURCE_DIR.glob("*.txt"))
+    source_dir = Path(args.source_dir)
+    out_parquet = Path(args.out_parquet)
+    report_summary = Path(args.report_summary)
+
+    # Params efectivos usados (para summary + MLflow)
+    params: Dict[str, Any] = {
+        "source_dir": str(source_dir.as_posix()),
+        "out_parquet": str(out_parquet.as_posix()),
+        "report_summary": str(report_summary.as_posix()),
+        "datetime_format": str(args.datetime_format),
+        "sep": str(args.sep),
+        "cols": list(COLS),
+        "dtypes": dict(DTYPES),
+    }
+
+    log.info("[1] Verificando archivos .txt en: %s", source_dir)
+    files = sorted(source_dir.glob("*.txt"))
     if not files:
-        raise SystemExit(
-            f"ERROR: '{SOURCE_DIR}' está vacío. "
-            "Copie los .txt allí y reintente."
-        )
-    
-    log.info(f"[OK] Archivos .txt encontrados")
-    # Construcción del dataset raw
-    # Nota: en DVC normalmente se reconstruye siempre;
-    # el control de cambios lo hace DVC con deps/outs.
-    
-    log.info(f"[2] Construyendo dataset mnq_raw.parquet")
-    df_mnq_raw, per_file_rows_read, per_file_invalid_datetime_dropped, invalid_datetime_dropped_total = generate_df(SOURCE_DIR)
-    log.info(f"[OK] Dataset construido correctamente")
+        raise SystemExit(f"ERROR: '{source_dir}' está vacío. Copie los .txt allí y reintente.")
+    log.info("[OK] Archivos .txt encontrados: %s", len(files))
 
-    # Asegurar que exista data/raw/
-    OUT_PARQUET.parent.mkdir(parents=True, exist_ok=True)
-    
-    # -----------------------------------------------------------------
-    # Checks de integridad temporal (NO modifican datos)
-    # -----------------------------------------------------------------
-    is_monotonic = df_mnq_raw.index.is_monotonic_increasing
-    n_duplicates = int(df_mnq_raw.index.duplicated().sum())
-
-    log.info(f"[CHECK] Index monotonic increasing: {is_monotonic}")
-    log.info(f"[CHECK] Duplicated timestamps: {n_duplicates}")
-
-    if not is_monotonic:
-        log.warning(
-            "[WARN] El índice temporal NO es monótono creciente. "
-            "Revisar orden o solapes entre archivos."
-        )
-
-    if n_duplicates > 0:
-        log.warning(
-            f"[WARN] Se detectaron {n_duplicates} timestamps duplicados "
-            "en el índice temporal."
-        )  
-
-    log.info(f"[3] Guardando dataset mnq_raw.parquet")
-    # Guardar parquet RAW (con índice datetime)
-    df_mnq_raw.to_parquet(OUT_PARQUET, index=True)
-    log.info(f"[OK] Dataset PARQUET: {OUT_SUMMARY}")
-
-    
-    log.info(f"[4] Generando stage_00_ingest_summary.json")
-
-    summary = build_stage_00_summary(
-        df=df_mnq_raw,
-        files=files,
-        source_dir=SOURCE_DIR,
-        out_parquet=OUT_PARQUET,
-        out_summary=OUT_SUMMARY,  # ahora: reports/stage_00_ingest_summary.json
-        datetime_format=DATETIME_FORMAT,
-        sep=SEP,
-        invalid_datetime_dropped_total=invalid_datetime_dropped_total,
-        per_file_rows_read=per_file_rows_read,
-        per_file_invalid_datetime_dropped=per_file_invalid_datetime_dropped,
+    log.info("[2] Ingestando y consolidando dataset RAW")
+    (
+        df_mnq_raw,
+        files_used,
+        per_file_rows_read,
+        per_file_invalid_datetime_dropped,
+        invalid_datetime_dropped_total,
+    ) = generate_df(
+        source_dir,
+        sep=str(args.sep),
+        datetime_format=str(args.datetime_format),
+        cols=COLS,
+        dtypes=DTYPES,
     )
 
-    log.info(f"[OK] Summary JSON: {OUT_SUMMARY}")
-    print_stage_00_summary_console(summary)
+    # Checks rápidos de integridad temporal (sin modificar)
+    is_monotonic = bool(df_mnq_raw.index.is_monotonic_increasing)
+    n_duplicates = int(df_mnq_raw.index.duplicated().sum())
+    log.info("[CHECK] Index monotonic increasing: %s", is_monotonic)
+    log.info("[CHECK] Duplicated timestamps: %s", n_duplicates)
+    if not is_monotonic:
+        log.warning("[WARN] Índice temporal NO monótono. Revisar solapes/orden de archivos.")
+    if n_duplicates > 0:
+        log.warning("[WARN] Timestamps duplicados detectados: %s", n_duplicates)
 
-    log.info("\n[OK] Stage_00 completo")
+    log.info("[3] Guardando parquet RAW: %s", out_parquet)
+    _ensure_parent_dir(out_parquet)
+    df_mnq_raw.to_parquet(out_parquet, index=True)
+
+    log.info("[4] Calculando metrics/details y construyendo summary envelope")
+    metrics, details = compute_stage_00_metrics_details(
+        df=df_mnq_raw,
+        files=files_used,
+        source_dir=source_dir,
+        out_parquet=out_parquet,
+        report_summary=report_summary,
+        sep=str(args.sep),
+        datetime_format=str(args.datetime_format),
+        cols=COLS,
+        per_file_rows_read=per_file_rows_read,
+        per_file_invalid_datetime_dropped=per_file_invalid_datetime_dropped,
+        invalid_datetime_dropped_total=invalid_datetime_dropped_total,
+    )
+
+    summary = build_summary_envelope(
+        stage=STAGE_NAME,
+        version=STAGE_VERSION,
+        inputs={"source_dir": str(source_dir.as_posix())},
+        outputs={"mnq_raw_parquet": str(out_parquet.as_posix())},
+        reports={"ingest_summary": str(report_summary.as_posix())},
+        params=params,
+        metrics=metrics,
+        details=details,
+    )
+
+    log.info("[5] Guardando report summary JSON: %s", report_summary)
+    save_json(summary, report_summary)
+
+    print_summary_console(summary)
+
+    log.info("[6] MLflow tracking (REQUERIDO)")
+    mlflow_log_from_summary(
+        stage=STAGE_NAME,
+        summary=summary,
+        summary_path=report_summary,
+        tags={"pipeline": "neural_profit", "dataset": "MNQ"},
+    )
+
+    log.info("[OK] Stage_00 completado")
+    log.info("Output parquet: %s", out_parquet)
+    log.info("Report summary: %s", report_summary)
+
+
 # ---------------------------------------------------------------------
-# Boilerplate Python estándar
+# Boilerplate
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
     main()
