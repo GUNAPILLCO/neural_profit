@@ -1,6 +1,6 @@
 {
   "stage": "stage_01_intraday_data_preparation",
-  "created_at_utc": "2026-01-16T03:29:35.463858+00:00",
+  "created_at_utc": "2026-01-24T23:29:55.274460+00:00",
   "version": "1.0",
   "paths": {
     "inputs": {

@@ -1,11 +1,11 @@
 {
   "stage": "stage_05_time_aware_data_splitting",
-  "created_at_utc": "2026-01-16T03:30:07.195610+00:00",
+  "created_at_utc": "2026-01-24T23:46:05.892645+00:00",
   "version": "1.0",
   "paths": {
     "inputs": {
       "features_parquet": "data\\features\\mnq_features_target.parquet",
-      "schema_summary": "reports\\features_target_summary.json",
+      "schema_summary": "reports\\stage_04_feature_engineering_summary.json",
       "params_yaml": "params.yaml"
     },
     "outputs": {
@@ -47,8 +47,8 @@
         "high",
         "low",
         "close",
-        "price_ema60",
-        "momentum_10",
+        "ema_60",
+        "mom_10_struct",
         "roc_30",
         "roc_60"
       ],

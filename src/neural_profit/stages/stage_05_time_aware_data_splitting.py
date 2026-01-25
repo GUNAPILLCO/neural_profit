@@ -59,7 +59,7 @@ log = logging.getLogger("stage_05_time_aware_data_splitting")
 # 3) Configuración DVC-friendly (SIEMPRE presente)
 # =========================
 IN_FEATURES_PARQUET = Path(os.environ.get("IN_FEATURES_PARQUET", "data/features/mnq_features_target.parquet"))
-IN_SCHEMA_SUMMARY = Path(os.environ.get("IN_SCHEMA_SUMMARY", "reports/features_target_summary.json"))
+IN_SCHEMA_SUMMARY = Path(os.environ.get("IN_SCHEMA_SUMMARY", "reports/stage_04_feature_engineering_summary.json"))
 PARAMS_YAML = Path(os.environ.get("PARAMS_YAML", "params.yaml"))
 
 OUT_TRAIN_PARQUET = Path(os.environ.get("OUT_TRAIN_PARQUET", "data/splits/mnq_train.parquet"))
@@ -126,18 +126,44 @@ def add_date_column(df: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
 def load_features_targets_from_summary(path: Path) -> Tuple[List[str], List[str]]:
     if not path.exists():
         raise FileNotFoundError(f"No se encontró schema summary: {path}")
-    with path.open("r", encoding="utf-8") as f:
-        s = json.load(f)
 
-    schema = (s.get("details", {}) or {}).get("schema", {}) or s.get("schema", {})
-    # soporta ambos formatos: envelope (details.schema) o resumen simple (schema)
+    with path.open("r", encoding="utf-8") as f:
+        s: Dict[str, Any] = json.load(f)
+
+    # 1) Intenta formato "envelope": details.schema
+    schema = None
+    details = s.get("details")
+    if isinstance(details, dict):
+        ds = details.get("schema")
+        if isinstance(ds, dict):
+            schema = ds
+
+    # 2) Fallback a formato simple: schema
+    if schema is None:
+        sch = s.get("schema")
+        if isinstance(sch, dict):
+            schema = sch
+
+    if not isinstance(schema, dict):
+        raise ValueError(
+            f"Summary inválido: no se encontró 'details.schema' ni 'schema'. "
+            f"Keys disponibles: {sorted(s.keys())}"
+        )
+
     features = schema.get("features", [])
     targets = schema.get("targets", [])
 
     if not isinstance(features, list) or not isinstance(targets, list):
-        raise ValueError("schema.features/targets inválidos en el summary de stage_04.")
+        raise ValueError(
+            f"schema.features/targets inválidos. "
+            f"types: features={type(features).__name__}, targets={type(targets).__name__}"
+        )
 
-    return list(features), list(targets)
+    # Normaliza a strings (por seguridad)
+    features = [str(x) for x in features]
+    targets = [str(x) for x in targets]
+
+    return features, targets
 
 
 def read_stage05_params(params_yaml: Path) -> Stage05Params:

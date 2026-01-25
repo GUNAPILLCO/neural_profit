@@ -1,6 +1,6 @@
 {
   "stage": "stage_00_raw_data_ingestion",
-  "created_at_utc": "2026-01-16T03:29:26.724660+00:00",
+  "created_at_utc": "2026-01-24T23:29:42.652401+00:00",
   "version": "1.0",
   "paths": {
     "inputs": {

@@ -119,6 +119,11 @@ def add_or_replace_date_col(df: pd.DataFrame, date_col: str = "date") -> pd.Data
     return out[cols]
 
 
+from typing import Tuple, List
+import pandas as pd
+from ta.momentum import ROCIndicator
+
+
 def compute_indicators_per_day(
     df: pd.DataFrame,
     *,
@@ -130,27 +135,40 @@ def compute_indicators_per_day(
     roc_60: int,
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Calcula indicadores de forma independiente por día (sin leakage inter-día).
-    Devuelve df_out (mismas filas) + lista de columnas creadas.
+    Calcula indicadores técnicos por día (sin leakage inter-día).
+
+    Output (schema contractual):
+    - ema_60         : estructura (close / EMA - 1)
+    - mom_10_struct  : momentum condicionado por estructura
+    - roc_30         : magnitud
+    - roc_60         : magnitud
     """
     required = {date_col, close_col}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Faltan columnas requeridas: {sorted(missing)}")
 
-    indicator_cols = ["price_ema60", "momentum_10", "roc_30", "roc_60"]
+    indicator_cols = [
+        "ema_60",
+        "mom_10_struct",
+        "roc_30",
+        "roc_60",
+    ]
 
     def per_day(day_df: pd.DataFrame) -> pd.DataFrame:
         d = day_df.copy()
 
-        # EMA normalized extension
+        # --- Estructura ---
         ema = d[close_col].ewm(span=ema_span, adjust=False).mean()
-        d["price_ema60"] = d[close_col] / ema - 1.0
+        d["ema_60"] = d[close_col] / ema - 1.0
 
-        # Momentum pct_change
-        d["momentum_10"] = d[close_col].pct_change(momentum_lag)
+        # --- Momentum intermedio (NO se expone) ---
+        mom_10 = d[close_col].pct_change(momentum_lag)
 
-        # ROC
+        # --- Momentum estructural ---
+        d["mom_10_struct"] = mom_10 * d["ema_60"]
+
+        # --- ROC ---
         d["roc_30"] = ROCIndicator(close=d[close_col], window=roc_30).roc()
         d["roc_60"] = ROCIndicator(close=d[close_col], window=roc_60).roc()
 
@@ -167,19 +185,30 @@ def compute_indicators_per_day(
     return df_out, indicator_cols
 
 
+
 def select_final_columns(
     df: pd.DataFrame,
     *,
     date_col: str,
-    use_volume: bool,
+    use_volume: bool,  # se mantiene por compatibilidad, pero NO se usa
     indicator_cols: List[str],
     targets: Tuple[int, ...],
 ) -> Tuple[pd.DataFrame, List[str], List[str]]:
-    base_features = ["open", "high", "low", "close"]
-    if use_volume:
-        base_features.append("volume")
+    """
+    Selecciona columnas finales para stage_04.
 
+    NOTA:
+    - 'volume' se excluye de forma explícita del dataset final.
+    - El parámetro use_volume se conserva solo por compatibilidad
+      con versiones previas / CLI, pero no tiene efecto.
+    """
+    # Features base (volume EXCLUIDO)
+    base_features = ["open", "high", "low", "close"]
+
+    # Features finales
     feature_cols = base_features + indicator_cols
+
+    # Targets
     target_cols = [f"delta_pts_{h}" for h in targets]
 
     selected = [date_col] + feature_cols + target_cols

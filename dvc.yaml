@@ -153,7 +153,7 @@ stages:
     cmd: >-
       python src/neural_profit/stages/stage_05_time_aware_data_splitting.py
       --in-parquet data/features/mnq_features_target.parquet
-      --in-schema-summary reports/features_target_summary.json
+      --in-schema-summary reports/stage_04_feature_engineering_summary.json
       --params-yaml params.yaml
       --out-train-parquet data/splits/mnq_train.parquet
       --out-valid-parquet data/splits/mnq_valid.parquet
@@ -163,7 +163,7 @@ stages:
     deps:
       - src/neural_profit/stages/stage_05_time_aware_data_splitting.py
       - data/features/mnq_features_target.parquet
-      - reports/features_target_summary.json
+      - reports/stage_04_feature_engineering_summary.json
       - params.yaml
     params:
       - stage_05.train_ratio
