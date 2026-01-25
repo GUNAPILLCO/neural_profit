@@ -1,0 +1,79 @@
+{
+  "stage": "stage_04_feature_engineering",
+  "created_at_utc": "2026-01-24T23:45:39.922099+00:00",
+  "version": "1.0",
+  "paths": {
+    "inputs": {
+      "labeled_parquet": "data\\processed\\mnq_intraday_labeled.parquet"
+    },
+    "outputs": {
+      "features_parquet": "data\\features\\mnq_features_target.parquet"
+    },
+    "reports": {
+      "summary": "reports\\stage_04_feature_engineering_summary.json"
+    }
+  },
+  "params": {
+    "date_col": "date",
+    "close_col": "close",
+    "use_volume": true,
+    "ema_span": 60,
+    "momentum_lag": 10,
+    "roc_30": 30,
+    "roc_60": 60,
+    "targets": [
+      60,
+      90
+    ],
+    "dropna_policy": "any"
+  },
+  "metrics": {
+    "n_rows_in": 626743.0,
+    "n_rows_out": 548563.0,
+    "n_rows_dropped": 78180.0,
+    "n_days_in": 1303.0,
+    "n_days_out": 1303.0,
+    "rows_per_day_mean_in": 481.0,
+    "rows_per_day_mean_out": 421.0
+  },
+  "details": {
+    "schema": {
+      "date_col": "date",
+      "features": [
+        "open",
+        "high",
+        "low",
+        "close",
+        "ema_60",
+        "mom_10_struct",
+        "roc_30",
+        "roc_60"
+      ],
+      "targets": [
+        "delta_pts_60",
+        "delta_pts_90"
+      ],
+      "n_features": 8,
+      "n_targets": 2
+    },
+    "dropna": {
+      "dropna_rule": "dropna(all_final_cols)",
+      "n_rows_before": 626743,
+      "n_rows_after": 548563,
+      "n_rows_dropped": 78180
+    },
+    "nan_ratio_by_col": {
+      "date": 0.0,
+      "open": 0.0,
+      "high": 0.0,
+      "low": 0.0,
+      "close": 0.0,
+      "ema_60": 0.0,
+      "mom_10_struct": 0.0,
+      "roc_30": 0.0,
+      "roc_60": 0.0,
+      "delta_pts_60": 0.0,
+      "delta_pts_90": 0.0
+    }
+  }
+}

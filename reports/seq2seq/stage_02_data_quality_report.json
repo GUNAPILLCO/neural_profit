@@ -1,0 +1,77 @@
+{
+  "stage": "stage_02_data_quality_validation",
+  "created_at_utc": "2026-01-24T23:29:58.783981+00:00",
+  "version": "1.0",
+  "paths": {
+    "inputs": {
+      "mnq_intraday_parquet": "data/processed/mnq_intraday.parquet"
+    },
+    "outputs": {},
+    "reports": {
+      "quality_report": "reports/stage_02_data_quality_report.json"
+    }
+  },
+  "params": {
+    "in_intraday_parquet": "data/processed/mnq_intraday.parquet",
+    "report_quality": "reports/stage_02_data_quality_report.json",
+    "expected_freq_seconds": 60,
+    "expected_minutes_per_day": 451,
+    "max_incomplete_days_ratio": 0.01,
+    "max_gap_seconds": 60,
+    "max_total_nan_ratio": 0.001,
+    "max_col_nan_ratio": 0.002
+  },
+  "metrics": {
+    "pass": 1.0,
+    "days_total": 1303.0,
+    "incomplete_days_count": 0.0,
+    "incomplete_days_ratio": 0.0,
+    "gaps_count": 0.0,
+    "max_gap_seconds_found": 0.0,
+    "duplicates_count": 0.0,
+    "invalid_values_count": 0.0,
+    "total_nan_ratio": 0.0,
+    "audit_global_datetime_duplicates": 0.0,
+    "audit_days_non_monotonic": 0.0,
+    "nan_ratio__datetime": 0.0,
+    "nan_ratio__open": 0.0,
+    "nan_ratio__high": 0.0,
+    "nan_ratio__low": 0.0,
+    "nan_ratio__close": 0.0,
+    "nan_ratio__volume": 0.0,
+    "nan_ratio__date": 0.0
+  },
+  "details": {
+    "reason": null,
+    "checks": {
+      "datetime_parse_ok": true,
+      "required_cols_ok": true,
+      "total_nan_ratio_ok": true,
+      "col_nan_ratio_ok": true,
+      "incomplete_days_ratio_ok": true,
+      "gaps_ok": true,
+      "duplicates_ok": true,
+      "invalid_values_ok": true,
+      "audit_days_non_monotonic_ok": true,
+      "audit_global_datetime_duplicates_ok": true
+    },
+    "thresholds": {
+      "expected_freq_seconds": 60,
+      "expected_minutes_per_day": 451,
+      "max_incomplete_days_ratio": 0.01,
+      "max_gap_seconds": 60,
+      "max_total_nan_ratio": 0.001,
+      "max_col_nan_ratio": 0.002
+    },
+    "audit": {
+      "datetime_duplicates_global": 0,
+      "days_non_monotonic": 0,
+      "sample_days_non_monotonic": []
+    },
+    "invalid_examples": [],
+    "incomplete_days_sample": {
+      "n": 0,
+      "dates": []
+    }
+  }
+}

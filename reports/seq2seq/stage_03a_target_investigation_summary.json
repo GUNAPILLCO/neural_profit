@@ -1,0 +1,93 @@
+{
+  "stage": "stage_03a_target_investigation",
+  "created_at_utc": "2026-01-24T23:30:16.876343+00:00",
+  "version": "1.0",
+  "paths": {
+    "inputs": {
+      "intraday_parquet": "data/processed/mnq_intraday.parquet"
+    },
+    "outputs": {},
+    "reports": {
+      "summary": "reports/stage_03a_target_investigation_summary.json"
+    }
+  },
+  "params": {
+    "horizons": [
+      60,
+      90
+    ],
+    "top_n": 30,
+    "rr_min": 2.0,
+    "decimals": 2
+  },
+  "metrics": {
+    "h60_delta_base_med": 52.12,
+    "h60_delta_target_p70": 84.18,
+    "h60_delta_tail_p90": 140.7,
+    "h60_stop_recommended": 37.84,
+    "h60_rr_recommended": 2.22,
+    "h90_delta_base_med": 60.75,
+    "h90_delta_target_p70": 97.22,
+    "h90_delta_tail_p90": 162.3,
+    "h90_stop_recommended": 43.42,
+    "h90_rr_recommended": 2.24
+  },
+  "details": {
+    "summary_rows": [
+      {
+        "horizon_min": 60,
+        "optimal_window": "09:14-09:41",
+        "delta_base_med": 52.12,
+        "delta_target_p70": 84.18,
+        "delta_tail_p90": 140.7,
+        "stop_loss_p70": 37.84,
+        "stop_loss_p80": 49.8,
+        "RR_target_p70_vs_SL_p70": 2.22,
+        "RR_target_p70_vs_SL_p80": 1.69,
+        "RR_tail_p90_vs_SL_p70": 3.72,
+        "RR_tail_p90_vs_SL_p80": 2.83,
+        "stop_recomendado_tipo": "p70",
+        "stop_recomendado": 37.84,
+        "RR_recomendado": 2.22
+      },
+      {
+        "horizon_min": 90,
+        "optimal_window": "09:09-09:36",
+        "delta_base_med": 60.75,
+        "delta_target_p70": 97.22,
+        "delta_tail_p90": 162.3,
+        "stop_loss_p70": 43.42,
+        "stop_loss_p80": 56.75,
+        "RR_target_p70_vs_SL_p70": 2.24,
+        "RR_target_p70_vs_SL_p80": 1.71,
+        "RR_tail_p90_vs_SL_p70": 3.74,
+        "RR_tail_p90_vs_SL_p80": 2.86,
+        "stop_recomendado_tipo": "p70",
+        "stop_recomendado": 43.42,
+        "RR_recomendado": 2.24
+      }
+    ],
+    "optimal_window_60": {
+      "start_minute_of_day": 554,
+      "end_minute_of_day": 581,
+      "start_hhmm": "09:14",
+      "end_hhmm": "09:41"
+    },
+    "optimal_window_90": {
+      "start_minute_of_day": 549,
+      "end_minute_of_day": 576,
+      "start_hhmm": "09:09",
+      "end_hhmm": "09:36"
+    },
+    "stop_loss_window_medians": {
+      "h60": {
+        "p70": 37.83749999999999,
+        "p80": 49.80000000000001
+      },
+      "h90": {
+        "p70": 43.425,
+        "p80": 56.75
+      }
+    }
+  }
+}
