@@ -12,6 +12,7 @@ data/source/
 data/raw/
 data/processed/
 data/features/
+zstage_06
 
 # Parquet / binarios
 *.parquet
