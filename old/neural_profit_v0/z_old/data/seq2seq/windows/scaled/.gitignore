@@ -1,8 +1,0 @@
-/windows_train_60_z.npz
-/windows_valid_60_z.npz
-/windows_test_60_z.npz
-/windows_train_90_z.npz
-/windows_valid_90_z.npz
-/windows_test_90_z.npz
-/scaler_60.pkl
-/scaler_90.pkl

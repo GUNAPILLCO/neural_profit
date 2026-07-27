@@ -1,0 +1,20 @@
+# Datos locales y archivos generados
+data/
+notebooks/html/
+notebooks/pdf/
+
+# Documentación local no versionada
+research_and_planning/plans_and_proposals/
+
+# Solo PDF ubicados directamente en books_and_references
+research_and_planning/books_and_references/*.pdf
+
+# Archivos temporales de Jupyter
+.ipynb_checkpoints/
+
+# Caché de Python
+__pycache__/
+*.pyc
+
+# Variables de entorno
+.env
