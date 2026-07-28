@@ -2,9 +2,6 @@
 data/
 #notebooks/
 
-# Documentación local no versionada
-research_and_planning/plans_and_proposals/
-
 # Libros no versionados
 research_and_planning/
 
