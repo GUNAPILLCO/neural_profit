@@ -263,3 +263,59 @@ Cualquier cambio en horario, calendario, días eliminados o regímenes puede mod
 6. Implementar las validaciones OHLCV declaradas.
 7. Corregir el Markdown para que coincida con el código y el pipeline vigente.
 8. No regenerar etapas posteriores hasta decidir si estos cambios alteran el dataset histórico oficial.
+
+Todo lo anterior en este documento describe **exclusivamente la notebook v1**
+(`S01_intraday_data_preparation.ipynb`), que no fue modificada y se
+conserva como evidencia histórica. Sus resultados (regímenes con límites
+incorrectos, calendario NASDAQ, 80 días eliminados sin clasificar) **no
+deben presentarse como vigentes.** El cierre real de la etapa se realizó
+mediante una implementación nueva (v2) — ver §11.
+
+---
+
+## 11. S01 v2 — Cierre aprobado (actualización)
+
+**S01 v2 fue aprobado formalmente.** Es la implementación vigente.
+
+```text
+Implementación:    src/data/s01_intraday_preparation.py
+Config:            config/intraday_config.yaml
+Notebook vigente:  notebooks/S01_intraday_data_preparation_v2.ipynb
+Artefacto oficial: data/02_intraday/mnq_intraday_v2.parquet
+Auditoría de días: data/02_intraday/trading_day_audit_v2.parquet
+Distribución:      data/02_intraday/regime_distribution_v2.parquet
+Manifiesto:        data/02_intraday/mnq_intraday_v2_manifest.json (autoritativo)
+Validación tz:     data/02_intraday/tz_validation_v2.json
+Reporte:           reports/stage_reports/S01_v2_report.md
+Pruebas:           42/42 aprobadas (26 unitarias + 16 de integración)
+Filas:             1.087.777 (subconjunto full_coverage: 1.482 × 691 = 1.024.062, idéntico a v1)
+```
+
+### Resolución de los 8 pendientes de §10
+
+| # | Pendiente (v1) | Resolución en S01 v2 |
+|---|---|---|
+| 1 | Calendario NASDAQ → CME/MNQ | Resuelto: calendario híbrido `CME_Equity` + datos observados como evidencia principal; ningún día se excluye silenciosamente |
+| 2 | Auditar las 80 jornadas eliminadas | Resuelto de forma más amplia: las 2.309 fechas del rango quedan clasificadas (no solo las 80 antiguas), con motivo explícito por fecha |
+| 3 | Corregir clasificación de regímenes | Resuelto: límites vigentes (`Regular` 10:30-14:59, `Closing` 15:00-16:00), sin ruta default, verificado con prueba de regresión sobre los 9 puntos límite; `regime_id=0` renombrado `Overnight → Early_Premarket` |
+| 4 | Recarga silenciosa de Parquet | Resuelto: manifest autoritativo con hash de fuente/módulo/config + `FORCE_REBUILD`, mismo patrón que S00 v2 |
+| 5 | Confirmar documentalmente UTC | **No resuelto documentalmente** (sigue sin config del proveedor), pero sustancialmente reforzado: UTC seleccionado por comparación empírica programática de 3 hipótesis (score 2.0 vs 1087.1/1105.1), declarado `timezone_provider_confirmation: false` |
+| 6 | Validaciones OHLCV declaradas | Fuera de alcance de S01 (ya garantizado por S00 v2); S01 v2 valida lo que le compete: régimen, ventana, consecutividad, DST |
+| 7 | Markdown no coincide con el código | Resuelto: notebook v2 delgada, sin bloques de texto que describan operaciones no implementadas |
+| 8 | No regenerar etapas posteriores sin decidir impacto | Aplicado: S02+ no fue tocado; el impacto del cambio de calendario/regímenes queda documentado para cuando se aborde S02 |
+
+### Pendiente que sigue abierto (no bloqueante)
+
+```text
+244 jornadas partial_undetermined + 11 no_data_undetermined (causa sin determinar)
+Patrón recurrente 16:20-16:30 (2019-2021): fuera de la ventana primaria, no
+  afecta mnq_intraday_v2.parquet
+Discrepancia CME_Equity vs "CME Globex Equity" (1 día, 2025-01-09): no revalidada
+Confirmación documental de zona horaria de origen: sigue pendiente
+test_s00_integration.py::test_never_writes_to_productive_raw_dir: falla
+  preexistente de S00 (asume data/01_raw/ vacío), no relacionada con S01 v2
+```
+
+Detalle completo en `reports/stage_reports/S01_v2_report.md`,
+`01_CURRENT_DECISIONS.md §32` y
+`02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.2-bis`.

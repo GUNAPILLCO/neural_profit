@@ -379,6 +379,16 @@ dataset intradía histórico: REQUIERE AUDITORÍA
 
 No se afirma que todas las fechas sean incorrectas, pero el procedimiento no es metodológicamente aceptable como definitivo.
 
+**Actualización (S01 v2 — APROBADO):**
+
+```text
+RESUELTO. Calendario híbrido: CME_Equity (calendario de futuros de índice
+CME Globex) como referencia primaria + los datos observados en
+mnq_raw_v2.parquet como evidencia principal. Ningún día se excluye
+únicamente por el calendario; cada fecha queda clasificada y trazable en
+data/02_intraday/trading_day_audit_v2.parquet.
+```
+
 ---
 
 ### Problema S01-02 — Filtrado temporal antes de conversión completa
@@ -398,6 +408,15 @@ localizar origen
 → convertir a America/New_York
 → asignar fecha operativa
 → aplicar calendario
+```
+
+**Actualización (S01 v2 — APROBADO):**
+
+```text
+RESUELTO. Orden real: localizar (hipótesis seleccionada programáticamente,
+no asumida) → convertir a America/New_York → filtrar ventana → asignar
+regimen/fecha. La zona horaria se selecciona ANTES de cualquier filtrado,
+comparando 3 hipótesis (ver S01-01 de 01_CURRENT_DECISIONS.md §32).
 ```
 
 ---
@@ -424,6 +443,19 @@ política de exclusión INVALIDADA COMO REGLA DEFINITIVA
 - pérdida de eventos especiales;
 - alteración de distribuciones;
 - reducción artificial de escenarios extremos.
+
+**Actualización (S01 v2 — APROBADO):**
+
+```text
+RESUELTO. Ninguna jornada se elimina. Las 2.309 fechas del rango quedan
+todas en trading_day_audit_v2.parquet con day_status y eligibility_category
+explícitos: 1.482 full_coverage, 305 jornadas parciales CON datos
+(244 partial_undetermined, 57 partial_early_close_cme,
+4 partial_gap_documented_s00) y 522 fechas SIN datos (475 no_data_weekend,
+25 no_data_gap_documented_s00, 11 no_data_cme_holiday,
+11 no_data_undetermined). Una jornada parcial puede ser
+partial_regime_eligible si al menos un régimen está completo y consecutivo.
+```
 
 ---
 
@@ -466,6 +498,17 @@ regime_id histórico: INVALIDADO
 - evaluación Closing;
 - uso de `regime_id` como predictor.
 
+**Actualización (S01 v2 — APROBADO):**
+
+```text
+RESUELTO. Regimen 3 (Regular) = 10:30-14:59, Regimen 4 (Closing) =
+15:00-16:00, sin ruta default. Regimen 0 conserva el mismo regime_id pero
+su etiqueta pasa de "Overnight" a "Early_Premarket" (04:30-08:29 no es
+overnight real de un futuro CME Globex; el overnight real, 18:05-04:29,
+queda fuera de la ventana actual). Los 9 puntos límite exactos (incluido
+16:00) tienen prueba de regresión automatizada.
+```
+
 ---
 
 ### Problema S01-05 — Barra de las 16:00 asignada a Overnight
@@ -479,6 +522,16 @@ clasificación INVALIDADA
 ```
 
 Todas las estadísticas de Overnight incluyen contaminación de la barra de cierre.
+
+**Actualización (S01 v2 — APROBADO):**
+
+```text
+RESUELTO Y VERIFICADO. build_regime_lookup() falla en tiempo de
+construcción si algún minuto de la ventana queda sin régimen asignado (sin
+ruta default posible). Prueba de integración confirma sobre datos reales
+que el 100% de las barras a minute_of_day=960 (16:00) tienen
+regime_id=4/Closing.
+```
 
 ---
 
@@ -500,6 +553,15 @@ reproducibilidad COMPROMETIDA
 
 Utilizar versionado, checksum, `FORCE_REBUILD` y metadata de creación.
 
+**Actualización (S01 v2 — APROBADO):**
+
+```text
+RESUELTO. Mismo patrón de manifest autoritativo que S00 v2: hash SHA-256 de
+fuente (mnq_raw_v2.parquet), del módulo y de la config normalizada, más
+pipeline_version y force_rebuild explícito, en
+data/02_intraday/mnq_intraday_v2_manifest.json.
+```
+
 ---
 
 ### Problema S01-07 — Validaciones declaradas pero no implementadas
@@ -513,6 +575,78 @@ afirmaciones de validación INVALIDADAS
 ```
 
 Los controles deben implementarse explícitamente en la reconstrucción.
+
+**Actualización (S01 v2 — APROBADO):**
+
+```text
+RESUELTO para el alcance de S01 (temporal/estructural; OHLCV ya lo garantiza
+S00 v2). 42 pruebas automatizadas (26 unitarias + 16 de integración sobre
+datos reales) cubren límites de régimen, ausencia de ruta default,
+segmentos consecutivos, clasificación de jornadas, DST y staleness.
+```
+
+---
+
+## 4.2-bis. S01 v2 — Estado tras la reconstrucción (APROBADO)
+
+**S01 v2 fue aprobado formalmente.** Reemplaza funcionalmente la
+preparación intradía de S01 v1. La notebook histórica
+`S01_intraday_data_preparation.ipynb` (v1) **no fue modificada** y se
+conserva únicamente como evidencia histórica; la implementación vigente es
+`src/data/s01_intraday_preparation.py` + `config/intraday_config.yaml` +
+`notebooks/S01_intraday_data_preparation_v2.ipynb`.
+
+```text
+Artefacto principal:  data/02_intraday/mnq_intraday_v2.parquet
+Filas:                 1.087.777  (vs. 1.024.062 histórico)
+Columnas:              date, minute_of_day, regime_id, regime_label,
+                       consecutive_segment_id, open, high, low, close,
+                       volume, contract
+Rango:                 2019-12-23 04:30 → 2026-04-17 16:00 (America/New_York)
+Pruebas:               42/42 aprobadas (26 unitarias + 16 de integración)
+```
+
+**Verificación cruzada exacta con S01 v1:** el subconjunto `full_coverage`
+de v2 (1.482 jornadas × 691 barras = 1.024.062 filas) reproduce
+exactamente el shape histórico de `mnq_intraday.parquet`. Las 63.715 filas
+adicionales de v2 provienen íntegramente de 305 jornadas parciales con
+datos que v1 descartaba sin clasificar (no de las 522 fechas sin ningún
+dato, que aportan 0 filas).
+
+**Confirmado / persistido correctamente:**
+
+```text
+timezone_selected = UTC, seleccionado por comparación programática de 3
+  hipótesis (UTC, America/New_York, America/Chicago) contra apertura 09:30,
+  cierre 16:00 y corte de mantenimiento CME (~17:00-18:00), score 2.0 vs
+  1087.1 / 1105.1 — no asumido
+timezone_provider_confirmation = false (evidencia empírica, no confirmación
+  documental del proveedor)
+timestamp_semantics = unknown_not_confirmed (sin evidencia suficiente; no
+  se desplazó ninguna barra)
+ventana 04:30-16:00 documentada explícitamente como decisión operativa
+  convencional, no como óptimo empírico
+```
+
+**Pendiente, no bloqueante para la aprobación:**
+
+```text
+244 jornadas partial_undetermined y 11 no_data_undetermined: CME_Equity
+  las marca como día de trading pero la cobertura no calza con ningún
+  patrón conocido — auditoría futura, no bloqueante
+Patrón recurrente 16:20-16:30 (2019-2021): fuera de la ventana primaria,
+  no afecta mnq_intraday_v2.parquet; relevante solo si se extiende la
+  ventana más allá de las 16:00
+Discrepancia CME_Equity vs "CME Globex Equity" (1 día, 2025-01-09): no
+  revalidada, se usó CME_Equity según lo aprobado
+Test global preexistente de S00 (tests/test_s00_integration.py::
+  test_never_writes_to_productive_raw_dir) falla porque asume
+  data/01_raw/ vacío; ya contiene los artefactos productivos de S00 v2.
+  No relacionado con S01 v2, no modificado (fuera del alcance de esta
+  etapa tocar pruebas de S00).
+```
+
+Detalle completo en `reports/stage_reports/S01_v2_report.md`.
 
 ---
 

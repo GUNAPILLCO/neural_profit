@@ -1,0 +1,107 @@
+# Configuracion S01 v2 (preparacion intradia MNQ). Nuevo archivo, no toca
+# config/data_config.yaml ni nada de S00. Ver mnq_project/stages/
+# S01_intraday_data_preparation_CONTEXT.md y el plan de auditoria de S01 v2
+# para el razonamiento detras de cada decision.
+
+pipeline_version: "s01_v2"
+
+input:
+  raw_parquet: "data/01_raw/mnq_raw_v2.parquet"
+  raw_manifest: "data/01_raw/mnq_raw_v2_manifest.json"
+  raw_gaps: "data/01_raw/mnq_raw_v2_gaps.parquet"
+
+# Ventana operativa primaria. 04:30 y 16:00 NO son quiebres estructurales
+# optimos (verificado empiricamente: la curva de cobertura es continua y
+# suave antes de 04:30 y no cae hasta el corte de mantenimiento ~17:01).
+# Se conservan por continuidad metodologica con S02-S07, ya disenados
+# alrededor de 691 barras/dia. 08:30-16:00 y 09:30-16:00 quedan documentadas
+# como alternativas futuras, no implementadas. No se extiende mas alla de
+# 16:00 por el patron recurrente 16:20-16:30 (2019-2021, ver known_gaps).
+window:
+  start_time: "04:30:00"
+  end_time: "16:00:00"
+  start_minute: 270
+  end_minute: 960
+  timezone: "America/New_York"
+  expected_minutes: 691
+  is_empirically_optimal: false
+  rationale: "conventional_operational_limit_not_data_driven_optimum"
+  documented_alternatives:
+    - {label: "extended_no_early_premarket", start_time: "08:30:00", end_time: "16:00:00", expected_minutes: 451}
+    - {label: "rth_only", start_time: "09:30:00", end_time: "16:00:00", expected_minutes: 391}
+
+# Cinco regimenes, mismos regime_id y limites vigentes. Unico cambio vs.
+# historico: etiqueta de regime_id=0 ("Overnight" -> "Early_Premarket"),
+# porque el overnight real de un futuro CME Globex es el tramo posterior a
+# la reapertura de mantenimiento (18:05) hasta pre-market temprano, un tramo
+# mucho mas largo que hoy queda fuera de la ventana. Limites en minute_of_day
+# (America/New_York, calculado despues de la conversion de zona horaria).
+regimes:
+  - {regime_id: 0, label: "Early_Premarket", start_minute: 270, end_minute: 509}  # 04:30-08:29
+  - {regime_id: 1, label: "Premarket",       start_minute: 510, end_minute: 569}  # 08:30-09:29
+  - {regime_id: 2, label: "Opening",         start_minute: 570, end_minute: 629}  # 09:30-10:29
+  - {regime_id: 3, label: "Regular",         start_minute: 630, end_minute: 899}  # 10:30-14:59
+  - {regime_id: 4, label: "Closing",         start_minute: 900, end_minute: 960}  # 15:00-16:00
+
+# Ningun minuto de la ventana puede quedar sin regimen asignado por una ruta
+# default silenciosa (bug historico S01-05/C2). El modulo debe validar
+# cobertura completa de los 691 minutos y fallar si algo no calza.
+regime_assignment:
+  allow_default_route: false
+
+# La hipotesis UTC no se asume: se evalua programaticamente contra
+# America/New_York y America/Chicago (ver s01_intraday_preparation.py,
+# evaluate_timezone_hypotheses). timezone_selected se completa en el
+# manifest/summary generados, no aqui (este archivo declara las hipotesis a
+# probar, no el resultado).
+timezone:
+  candidates: ["UTC", "America/New_York", "America/Chicago"]
+  target_tz: "America/New_York"
+  timezone_provider_confirmation: false
+  # completado en tiempo de ejecucion y persistido en manifest/summary:
+  #   timezone_selected, timezone_validation_status, timezone_evidence
+
+# No se asume la semantica del timestamp; ver s01_intraday_preparation.py
+# para el intento de busqueda de evidencia. Si no se confirma, se conserva
+# este valor sin desplazar ninguna barra.
+timestamp_semantics: "unknown_not_confirmed"
+
+# Calendario hibrido: CME_Equity como referencia primaria, pero los datos
+# observados son la evidencia principal. Ningun dia desaparece
+# silenciosamente por no coincidir con el calendario.
+calendar:
+  primary: "CME_Equity"
+  policy: "hybrid_observed_plus_calendar"
+  note: "CME_Equity se usa para calendar_status (cme_trading_day/weekend/cme_holiday) y para detectar cierres anticipados; nunca para excluir un dia con datos observados."
+
+# Gaps ya documentados en S00 (mnq_raw_v2_gaps.parquet) que caen sobre
+# jornadas de trading dentro de la ventana. Los dias dentro de estos rangos
+# se marcan explicitamente day_status=*_gap_documented_s00,
+# is_model_eligible=false, s00_gap_reference=<gap_id>.
+known_gaps:
+  - gap_id: "s00_gap_M23"
+    gap_type: "intra_file"
+    source_file: "13_mnq_06_23.Last.txt"
+    start: "2023-04-05T18:03:00"
+    end: "2023-04-16T14:18:00"
+  - gap_id: "s00_gap_H25_M25"
+    gap_type: "inter_contract"
+    source_file_left: "20_mnq_03_25.Last.txt"
+    source_file_right: "21_mnq_06_25.Last.txt"
+    start: "2025-03-21T13:30:00"
+    end: "2025-04-06T08:42:00"
+  - gap_id: "s01_pattern_1620_1630"
+    gap_type: "recurrent_minor_pattern"
+    note: "Gap recurrente ~16:20-16:30 ET, concentrado 2019-2021 (ver auditoria S01 v2 §16.5). Documentado, no bloqueante: cae dentro de la ventana primaria pero no afecta ningun regimen completo (Closing termina en 16:00)."
+    blocking: false
+
+artifacts:
+  intraday_dir: "data/02_intraday"
+  parquet_name: "mnq_intraday_v2.parquet"
+  summary_name: "mnq_intraday_v2_summary.json"
+  manifest_name: "mnq_intraday_v2_manifest.json"
+  trading_day_audit_name: "trading_day_audit_v2.parquet"
+  regime_distribution_name: "regime_distribution_v2.parquet"
+  tz_validation_name: "tz_validation_v2.json"
+
+force_rebuild: false

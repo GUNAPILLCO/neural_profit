@@ -513,6 +513,38 @@ barras por régimen
 transiciones de contrato
 ```
 
+## Estado: APROBADO (S01 v2)
+
+Implementado con sufijo `_v2`, mismo criterio que S00 v2:
+
+```text
+data/02_intraday/mnq_intraday_v2.parquet
+data/02_intraday/mnq_intraday_v2_summary.json
+data/02_intraday/mnq_intraday_v2_manifest.json   (autoritativo)
+data/02_intraday/trading_day_audit_v2.parquet     (2.309 fechas, motivo explícito por fecha)
+data/02_intraday/regime_distribution_v2.parquet
+data/02_intraday/tz_validation_v2.json            (comparación de 3 hipótesis de tz)
+reports/stage_reports/S01_v2_report.md
+```
+
+Resultado: 1.087.777 filas (subconjunto `full_coverage` = 1.482 × 691 =
+1.024.062, idéntico a S01 v1), 42/42 pruebas aprobadas. Desviación
+explícita respecto a "Decisiones previas obligatorias": la *timezone de
+origen* no quedó **confirmada** (no hay evidencia documental del proveedor),
+pero sí quedó **empíricamente respaldada** mediante comparación programática
+de 3 hipótesis (score 2.0 vs 1087.1/1105.1) — se avanzó bajo esa evidencia,
+declarándola explícitamente como no confirmada
+(`timezone_provider_confirmation: false`), no como decisión oculta.
+Calendario NASDAQ reemplazado por calendario híbrido CME_Equity + datos
+observados. Ningún régimen se asigna por valor por defecto (verificado con
+prueba de regresión). Ninguna jornada con menos de 691 barras se elimina
+sin análisis: las 827 fechas no-`full_coverage` quedan clasificadas
+(305 parciales con datos + 522 sin datos) con motivo explícito en
+`trading_day_audit_v2.parquet`. `notebooks/S01_intraday_data_preparation.ipynb`
+(v1) no fue modificada. Detalle completo en
+`01_CURRENT_DECISIONS.md §32` y
+`02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.2-bis`.
+
 ---
 
 # 9. Fase 4 — Auditoría de rollover

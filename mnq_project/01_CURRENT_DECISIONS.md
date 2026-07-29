@@ -978,3 +978,84 @@ Chequeo automatizado de solapamiento de intervalos entre archivos: MEJORA MENOR 
 
 Detalle completo: `reports/stage_reports/S00_v2_report.md` y
 `02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.1-bis`.
+
+---
+
+## 32. Estado vigente de S01 (APROBADO — S01 v2)
+
+S01 fue reconstruido y aprobado formalmente. Fija el artefacto de entrada
+vigente para cualquier trabajo posterior (S02 en adelante).
+
+```text
+Artefacto intradía vigente:  data/02_intraday/mnq_intraday_v2.parquet
+Auditoría de jornadas:       data/02_intraday/trading_day_audit_v2.parquet
+Distribución por régimen:    data/02_intraday/regime_distribution_v2.parquet
+Manifiesto autoritativo:     data/02_intraday/mnq_intraday_v2_manifest.json
+Validación de zona horaria:  data/02_intraday/tz_validation_v2.json
+Implementación:               src/data/s01_intraday_preparation.py
+Config:                        config/intraday_config.yaml
+Notebook vigente:              notebooks/S01_intraday_data_preparation_v2.ipynb
+Pruebas:                       42/42 aprobadas (26 unitarias + 16 de integración)
+Filas:                         1.087.777  (subconjunto full_coverage: 1.482 × 691 = 1.024.062, idéntico a S01 v1)
+```
+
+`data/02_intraday/mnq_intraday.parquet` (nombre histórico, sin sufijo)
+**no debe asumirse como artefacto vigente.**
+`notebooks/S01_intraday_data_preparation.ipynb` (v1, sin sufijo) **no fue
+modificada** y se conserva únicamente como evidencia histórica — sus
+resultados (regímenes con límites incorrectos, calendario NASDAQ, 80 días
+eliminados sin clasificar) **no deben presentarse como vigentes.**
+
+Decisiones confirmadas y vigentes sobre el dataset intradía:
+
+```text
+zona horaria de origen: UTC, seleccionada por comparación empírica
+  programática de 3 hipótesis (UTC, America/New_York, America/Chicago)
+  contra apertura 09:30 ET, cierre 16:00 ET y corte de mantenimiento CME
+  (~17:00-18:00 ET) — NO asumida, NO confirmada documentalmente por el
+  proveedor (timezone_provider_confirmation: false)
+timestamp_semantics: unknown_not_confirmed — ninguna barra fue desplazada
+ventana operativa: 04:30-16:00 America/New_York, ambos extremos incluidos,
+  691 minutos esperados — decisión operativa CONVENCIONAL, explícitamente
+  NO identificada como quiebre estructural óptimo (ver auditoría S01 v2)
+regímenes: 5, mismos regime_id 0-4 y límites vigentes
+  (10:30-14:59 Regular, 15:00-16:00 Closing, sin ruta default); único
+  cambio: etiqueta de regime_id=0 pasa de "Overnight" a "Early_Premarket"
+calendario: híbrido — CME_Equity como referencia + datos observados como
+  evidencia principal; ningún día se excluye silenciosamente
+jornadas parciales: conservadas y clasificadas explícitamente, nunca
+  eliminadas solo por conteo de barras (ver desglose completo abajo)
+```
+
+Clasificación de las 2.309 fechas calendario del rango
+(`trading_day_audit_v2.parquet`):
+
+```text
+1.482  full_coverage
+  305  parciales CON datos: 244 partial_undetermined, 57 partial_early_close_cme,
+       4 partial_gap_documented_s00
+  522  fechas SIN datos: 475 no_data_weekend, 25 no_data_gap_documented_s00,
+       11 no_data_cme_holiday, 11 no_data_undetermined
+```
+
+Los 29 días vinculados a gaps de S00 (12 a `s00_gap_M23`, 17 a
+`s00_gap_H25_M25`) quedan explícitamente `is_model_eligible=false`, con
+referencia trazable a `data/01_raw/mnq_raw_v2_gaps.parquet` — no se
+rellenó, interpoló ni eliminó ningún dato.
+
+Pendientes que **no bloquean** la aprobación de S01, pero deben
+resolverse o revisarse antes de tratar el dataset como completamente
+auditado:
+
+```text
+244 jornadas partial_undetermined + 11 no_data_undetermined: causa sin determinar
+Patrón recurrente 16:20-16:30 (2019-2021): fuera de la ventana primaria,
+  documentado, no afecta mnq_intraday_v2.parquet
+Discrepancia CME_Equity vs "CME Globex Equity" (1 día, 2025-01-09): no revalidada
+Confirmación documental de zona horaria de origen (heredada de S00): sigue pendiente
+test_s00_integration.py::test_never_writes_to_productive_raw_dir: falla
+  preexistente de S00 (asume data/01_raw/ vacío), no relacionada con S01 v2
+```
+
+Detalle completo: `reports/stage_reports/S01_v2_report.md` y
+`02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.2-bis`.
