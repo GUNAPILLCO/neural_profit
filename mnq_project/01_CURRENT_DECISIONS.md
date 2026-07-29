@@ -1059,3 +1059,124 @@ test_s00_integration.py::test_never_writes_to_productive_raw_dir: falla
 
 Detalle completo: `reports/stage_reports/S01_v2_report.md` y
 `02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.2-bis`.
+
+---
+
+## 33. Estado vigente de S02 (APROBADO — S02 v2, `APPROVED_WITH_KNOWN_LIMITATION`)
+
+S02 fue reconstruido y aprobado formalmente, con una limitación técnica
+conocida declarada explícitamente (no bloqueante). Fija el artefacto de
+análisis exploratorio vigente para cualquier trabajo posterior (S03 en
+adelante).
+
+```text
+Notebook oficial:      notebooks/S02_intraday_data_analysis_v2.ipynb
+Módulo oficial:         src/data/s02_intraday_analysis.py
+Config:                 config/s02_analysis_config.yaml
+Reporte:                reports/stage_reports/S02_v2_report.md
+Manifiesto autoritativo: data/02_intraday/s02_analysis_manifest.json
+Pruebas:                26/26 unitarias + 12/12 integración (S02) —
+                        114/115 en la suite completa del repo (única falla
+                        preexistente de S00, no relacionada)
+```
+
+Artefactos oficiales generados (todos en `data/02_intraday/`, gitignorados
+igual que el resto de `data/`):
+
+```text
+s02_summary.parquet
+s02_coverage_summary.parquet
+s02_regime_distribution.parquet
+s02_ohlcv_stats_summary.parquet
+s02_ohlcv_correlation.parquet
+s02_window_validity_summary.parquet
+s02_rollover_window_audit.parquet
+s02_window_metrics_summary.parquet
+s02_stability_summary.parquet
+s02_rolling_summary.parquet
+s02_temporal_instability_zones.parquet
+s02_acf_summary.parquet
+s02_dependence_tests_summary.parquet
+```
+
+`notebooks/S02_intraday_data_analysis.ipynb` (v1, sin sufijo) **no fue
+modificada** y se conserva únicamente como evidencia histórica — sus
+resultados (régimen contaminado, "Overnight" incluyendo la barra 16:00,
+cobertura asumida 691 barras/día siempre, generador exploratorio de features,
+"cambios estructurales" no formales, afirmación de holdout ciego 2025–2026)
+**no deben presentarse como vigentes.**
+
+Decisiones confirmadas y vigentes sobre el análisis intradía:
+
+```text
+poblaciones: all (cobertura/calidad/descriptivo) · full_day_eligible
+  (cuantitativa principal) · partial_regime_eligible (secundaria, solo
+  regímenes marcados regime_{id}_is_consecutive=True por S01) ·
+  descriptive_only (solo descripción) · not_model_eligible (excluida de
+  ventanas y métricas para stages posteriores)
+ventanas: válidas solo si comparten simultáneamente fecha, segmento de
+  minutos consecutivos (recalculado sobre la población filtrada), contrato
+  único y consecutividad estricta de minuto a minuto; cambio de contrato:
+  bloqueante, verificado empíricamente sin impacto (ver más abajo)
+body_signed_pts / body_abs_pts: nombres inequívocos, "body_pts" a secas no
+  se usa en ningún artefacto ni en el código
+terminología: "inestabilidad temporal" / "cambio de distribución", nunca
+  "cambio estructural" como conclusión; sin pruebas formales de ruptura
+ACF y Ljung-Box: gap-aware (nunca forman un par entre observaciones de
+  distinto consecutive_segment_id); ARCH-LM sigue sin serlo (ver limitación
+  abajo)
+targets: S02 no construye, evalúa ni selecciona DIR/BAR/OPC ni ningún otro
+generador exploratorio de features histórico: no se ejecuta ni se reproduce
+  en S02 v2; queda solo como antecedente en la notebook v1
+```
+
+Cifras verificadas por ejecución real (`s02_analysis_manifest.json` y
+artefactos):
+
+```text
+Filas totales (población 'all'):        1.087.777
+Jornadas full_day_eligible:              1.482  (691 barras/día exactas → 1.024.062 filas)
+Filas full_day_eligible:                 1.024.062  (idéntico al histórico v1/S02 v1)
+Filas partial_regime_eligible:              40.539  (119 días, solo regímenes consecutivos)
+Transiciones de contrato detectadas:            25
+Transiciones dentro de un mismo segmento:        0  (ningún rollover real cae dentro de
+                                                     una jornada/segmento; el bloqueo por
+                                                     contrato único no reduce validez alguna)
+Validez de ventana full_day_eligible:    30m 91,46% · 60m 82,78% · 90m 74,10% (full)
+Régimen full_day_eligible:               Early_Premarket 34,73% · Premarket 8,68% ·
+                                          Opening 8,68% · Regular 39,07% · Closing 8,83%
+```
+
+**Limitación técnica conocida (no bloqueante):**
+
+```text
+ARCH-LM (statsmodels.stats.diagnostic.het_arch) todavía NO es gap-aware:
+arma su matriz de regresores lageados sobre el array completo sin conocer
+límites de consecutive_segment_id, la misma contaminación que tenía
+Ljung-Box antes de corregirse en este cierre. Sus resultados son
+únicamente diagnósticos exploratorios sobre heterocedasticidad condicional
+y NO deben usarse como evidencia definitiva ni como criterio de selección
+de features o modelos. Corregirlo (reimplementación manual, no es un simple
+reescalado como la ACF) queda como tarea de mantenimiento metodológico
+posterior, fuera del alcance de este cierre.
+```
+
+Pendientes heredados que **no bloquean** la aprobación de S02 (ya
+documentados en S00/S01, S02 no los resuelve ni corresponde que lo haga):
+
+```text
+Zona horaria de origen y timestamp_semantics: siguen sin confirmación
+  documental (heredado de S00/S01).
+244 jornadas partial_undetermined + 11 no_data_undetermined: causa sin
+  determinar (heredado de S01).
+Auditoría general de rollover (Fase 4 del rebuild plan, transiciones crudas
+  de contrato: gap de precio, contexto completo): sigue pendiente como
+  etapa separada; S02 v2 solo aportó el impacto a nivel de ventana (0
+  transiciones intra-segmento).
+```
+
+Detalle completo, incluyendo la validación focalizada que encontró y
+corrigió la contaminación entre segmentos de ACF/Ljung-Box (y descartó dos
+falsos positivos sobre validez de ventanas y sobre `Closing`/h=90):
+`reports/stage_reports/S02_v2_report.md` y
+`02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.3-bis`.

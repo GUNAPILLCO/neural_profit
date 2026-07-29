@@ -630,6 +630,48 @@ data/02_intraday/s02_summary.parquet
 
 Debe quedar justificado si 30/60/90 continúan como horizontes candidatos.
 
+## Estado: `APPROVED_WITH_KNOWN_LIMITATION` (S02 v2)
+
+Implementado siguiendo el mismo patrón de gobernanza que S00 v2/S01 v2:
+
+```text
+Notebook oficial:       notebooks/S02_intraday_data_analysis_v2.ipynb
+Módulo:                 src/data/s02_intraday_analysis.py
+Config:                 config/s02_analysis_config.yaml
+Reporte:                reports/stage_reports/S02_v2_report.md
+Manifiesto:             data/02_intraday/s02_analysis_manifest.json
+Pruebas:                26/26 unitarias + 12/12 integración (114/115 en la
+                        suite completa del repo; única falla preexistente
+                        de S00, no relacionada)
+```
+
+Resultado: 1.087.777 filas totales, 1.024.062 en `full_day_eligible`
+(idéntico al histórico v1, 1.482 días × 691 barras), régimen corregido
+(`Closing` 4,34%→8,83%), 25 transiciones de contrato reales auditadas a
+nivel de ventana (0 dentro de un mismo segmento). 30/60/90 minutos siguen
+justificados como horizontes candidatos (evidencia de h60 como compromiso
+razonable se reproduce cuantitativamente sobre el dataset y régimen
+vigentes), sin declararse una decisión definitiva de horizonte — eso
+corresponde a S03/S04.
+
+Se agregó, más allá del alcance mínimo original: auditoría de ventanas
+afectadas por rollover (bloqueo por contrato único, sin duplicar la
+auditoría general de la Fase 4), y diagnóstico acotado de dependencia
+temporal (ACF, Ljung-Box gap-aware, ARCH-LM), no usado para seleccionar
+features.
+
+**Limitación técnica conocida (no bloqueante):** ARCH-LM no es gap-aware
+(hereda la misma contaminación entre segmentos que tenía Ljung-Box antes de
+corregirse); sus resultados son solo diagnósticos exploratorios, no deben
+usarse como evidencia definitiva ni como criterio de selección de features
+o modelos. Corrección pendiente como tarea de mantenimiento metodológico
+posterior.
+
+`notebooks/S02_intraday_data_analysis.ipynb` (v1, sin sufijo) no fue
+modificada y se conserva como evidencia histórica. Detalle completo en
+`01_CURRENT_DECISIONS.md §33` y
+`02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.3-bis`.
+
 ---
 
 # 11. Fase 6 — Diseño de validación temporal

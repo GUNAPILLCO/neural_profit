@@ -215,6 +215,19 @@ Hallazgo principal:
 
 Los análisis globales siguen siendo útiles. Los análisis por régimen deben revisarse si se corrige S01.
 
+**Estado: `APPROVED_WITH_KNOWN_LIMITATION` (S02 v2).** Reconstruido contra el
+régimen y dataset vigentes de S01 v2 (`notebooks/S02_intraday_data_analysis_v2.ipynb`
++ `src/data/s02_intraday_analysis.py`). Los análisis por régimen ya no
+requieren revisión: fueron regenerados contra `regime_label` corregido
+(`Closing` 4,34%→8,83%). Se agregó auditoría de ventanas afectadas por
+rollover (bloqueo por contrato único, 0 impacto sobre las 25 transiciones
+reales) y diagnóstico acotado de dependencia temporal (ACF, Ljung-Box
+gap-aware, ARCH-LM — este último con limitación conocida no gap-aware, no
+bloqueante). La notebook histórica v1 no fue modificada y se conserva como
+antecedente. Detalle completo en `01_CURRENT_DECISIONS.md §33`,
+`02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.3-bis` y
+`reports/stage_reports/S02_v2_report.md`.
+
 ### S03 — Threshold Calibration
 
 Función:

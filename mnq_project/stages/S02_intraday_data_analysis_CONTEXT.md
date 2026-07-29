@@ -408,3 +408,97 @@ regímenes originales → convención corregida pendiente de consolidación
 5. mantener los archivos pesados fuera de GitHub;
 6. tratar el script de features de S02 únicamente como antecedente;
 7. conservar como oficiales los targets y features definidos en stages posteriores.
+
+Todo lo anterior en este documento describe **exclusivamente la notebook
+v1** (`S02_intraday_data_analysis.ipynb`), que no fue modificada y se
+conserva como evidencia histórica. Sus resultados (régimen contaminado,
+cobertura asumida 691 barras/día siempre, `body_pts` ambiguo, generador
+exploratorio de features, "cambios estructurales" no formales, afirmación de
+holdout ciego 2025–2026) **no deben presentarse como vigentes.** El cierre
+real de la etapa se realizó mediante una implementación nueva (v2) — ver
+§15.
+
+---
+
+## 15. S02 v2 — Cierre aprobado (actualización)
+
+**S02 v2 fue aprobado formalmente**, con estado
+`APPROVED_WITH_KNOWN_LIMITATION` (limitación técnica conocida declarada
+explícitamente, no bloqueante). Es la implementación vigente.
+
+```text
+Implementación:    src/data/s02_intraday_analysis.py
+Config:            config/s02_analysis_config.yaml
+Notebook vigente:  notebooks/S02_intraday_data_analysis_v2.ipynb
+Reporte:           reports/stage_reports/S02_v2_report.md
+Manifiesto:        data/02_intraday/s02_analysis_manifest.json
+Pruebas:           26/26 unitarias + 12/12 integración (114/115 en la suite
+                   completa del repo; única falla preexistente de S00, no
+                   relacionada)
+```
+
+### Resolución de los 7 pendientes de §14
+
+| # | Pendiente (v1) | Resolución en S02 v2 |
+|---|---|---|
+| 1 | Corregir los regímenes en la fuente | No corresponde a S02 (ya resuelto en S01 v2); S02 v2 consume `regime_label` vigente de S01 v2 sin recalcularlo |
+| 2 | Recalcular resultados dependientes de `regime_id` | Resuelto: `s02_regime_distribution`, `s02_window_metrics_summary`, `s02_stability_summary` y ACF/Ljung-Box por régimen regenerados contra el régimen corregido (`Closing` 4,34%→8,83%) |
+| 3 | Decidir si se reconstruirán los artefactos posteriores | Decidido y ejecutado: se reconstruyó S02 completo; artefactos pesados por-barra (`df_window_metrics`) reemplazados por resúmenes agregados versionables, nunca persistidos como tabla masiva |
+| 4 | Unificar la definición de `body_pts` | Resuelto: `body_signed_pts` (con signo) y `body_abs_pts` (valor absoluto) en todo el código y artefactos; `body_pts` a secas no existe en S02 v2 |
+| 5 | Mantener los archivos pesados fuera de GitHub | Resuelto: `data/` gitignorado (mismo patrón que S00/S01); ningún artefacto por-barra se genera ni se versiona |
+| 6 | Tratar el script de features de S02 únicamente como antecedente | Resuelto: el generador exploratorio no se ejecuta ni se reproduce en S02 v2; permanece solo dentro de la notebook v1 intacta |
+| 7 | Conservar como oficiales los targets y features definidos en stages posteriores | Aplicado: S02 v2 no construye, evalúa ni selecciona DIR/BAR/OPC ni ninguna feature definitiva; solo menciona a S04/S05 como responsables |
+
+### Validación focalizada adicional (post-aprobación inicial)
+
+Antes del cierre se verificaron tres posibles inconsistencias:
+
+```text
+1. Validez de ventanas: confirmado correcto (0 diferencia contra la formula
+   teorica en las 9 filas de s02_window_validity_summary.parquet); el unico
+   problema era una redaccion ambigua en un resumen previo, corregida.
+2. Closing / h=90: confirmado que no hay restriccion implicita de regimen;
+   causa exacta = "insufficient_bars" (el dia termina antes de completar 90
+   minutos futuros), nunca "contract_change".
+3. ACF/Ljung-Box: confirmado que SI formaban pares espurios entre segmentos
+   distintos tras el dropna. CORREGIDO (gap-aware). Efecto medido pequeno,
+   ninguna conclusion cambia.
+```
+
+### Limitación técnica conocida (no bloqueante)
+
+```text
+ARCH-LM no es gap-aware (misma clase de problema que tenia Ljung-Box antes
+de corregirse). Sus resultados son unicamente diagnosticos exploratorios
+sobre heterocedasticidad condicional; no deben usarse como evidencia
+definitiva ni como criterio de seleccion de features o modelos. Correccion
+pendiente como tarea de mantenimiento metodologico posterior.
+```
+
+### Cifras verificadas por ejecución real
+
+```text
+Filas totales (poblacion 'all'):        1.087.777
+Jornadas full_day_eligible:              1.482 (691 barras/dia exactas)
+Filas full_day_eligible:                 1.024.062 (identico al historico v1)
+Filas partial_regime_eligible:              40.539 (119 dias)
+Transiciones de contrato reales:                25
+Transiciones dentro de un mismo segmento:        0
+Validez de ventana full_day_eligible (full):  30m 91,46% · 60m 82,78% · 90m 74,10%
+```
+
+### Pendiente que sigue abierto (no bloqueante)
+
+```text
+Zona horaria de origen y timestamp_semantics: sin confirmacion documental
+  (heredado de S00/S01).
+244 jornadas partial_undetermined + 11 no_data_undetermined: causa sin
+  determinar (heredado de S01).
+Auditoria general de rollover (Fase 4 del rebuild plan): pendiente como
+  etapa separada; S02 v2 solo aporto el impacto a nivel de ventana.
+ARCH-LM no gap-aware (ver limitacion arriba).
+```
+
+Detalle completo en `reports/stage_reports/S02_v2_report.md`,
+`01_CURRENT_DECISIONS.md §33` y
+`02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.3-bis`.

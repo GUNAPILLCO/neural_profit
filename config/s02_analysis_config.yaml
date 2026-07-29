@@ -1,0 +1,77 @@
+# Configuracion S02 v2 (analisis intradia MNQ). No toca config/intraday_config.yaml
+# ni config/data_config.yaml. Ver mnq_project/stages/S02_intraday_data_analysis_CONTEXT.md
+# y reports/stage_reports/S02_v2_report.md para el razonamiento detras de cada decision.
+
+pipeline_version: "s02_v2"
+
+# Artefactos de entrada: exclusivamente la salida aprobada de S01 v2. Nunca se
+# lee data/02_mnq_intraday/mnq_intraday.parquet (historico v1).
+input:
+  intraday_parquet: "data/02_intraday/mnq_intraday_v2.parquet"
+  intraday_manifest: "data/02_intraday/mnq_intraday_v2_manifest.json"
+  trading_day_audit: "data/02_intraday/trading_day_audit_v2.parquet"
+
+# Poblaciones de analisis (decision del usuario, turno de aceptacion de la
+# revision tecnica):
+# - all: todos los datos observados. Solo para cobertura/calidad/descriptivo.
+# - full_day_eligible: poblacion cuantitativa principal (691/691 barras,
+#   consecutiva). Ventanas, metricas por ventana, estabilidad, rolling,
+#   dependencia temporal se calculan primero aqui.
+# - partial_regime_eligible: poblacion secundaria, restringida barra a barra
+#   a los regimenes marcados regime_{id}_is_consecutive=True en
+#   trading_day_audit_v2.parquet (nunca por conteo propio).
+# - descriptive_only: solo se describe (cobertura/conteos), nunca entra a
+#   ventanas ni a metricas destinadas a stages posteriores.
+# not_model_eligible se excluye explicitamente de ventanas/metricas y solo
+# aparece en la cobertura sobre "all".
+populations:
+  - "all"
+  - "full_day_eligible"
+  - "partial_regime_eligible"
+  - "descriptive_only"
+
+quantitative_populations:
+  - "full_day_eligible"
+  - "partial_regime_eligible"
+
+# Horizontes candidatos, sin cambios respecto del historico.
+horizons_minutes: [30, 60, 90]
+
+# Ventanas rolling a nivel diario (en trading days), para el diagnostico de
+# inestabilidad temporal (ex "cambios estructurales").
+rolling_windows_days: [20, 60, 120]
+rolling_min_period_ratio: 0.70
+
+# Percentiles usados para marcar zonas altas/extremas en el rolling.
+temporal_instability_zone_percentiles:
+  high: 0.75
+  extreme: 0.90
+
+# Dependencia temporal: ACF, Ljung-Box, ARCH-LM. Solo diagnostico -- no se usa
+# todavia para seleccionar features (responsabilidad de S05).
+dependence:
+  series: ["ret_1m", "abs_ret_1m", "squared_ret_1m"]
+  max_lag: 10
+  ljung_box_lags: [5, 10]
+  arch_lm_lags: 10
+  min_obs_global: 20000
+  min_obs_regime: 5000
+
+artifacts:
+  intraday_dir: "data/02_intraday"
+  summary_name: "s02_summary.parquet"
+  coverage_name: "s02_coverage_summary.parquet"
+  regime_distribution_name: "s02_regime_distribution.parquet"
+  ohlcv_stats_name: "s02_ohlcv_stats_summary.parquet"
+  ohlcv_correlation_name: "s02_ohlcv_correlation.parquet"
+  window_validity_name: "s02_window_validity_summary.parquet"
+  rollover_audit_name: "s02_rollover_window_audit.parquet"
+  window_metrics_summary_name: "s02_window_metrics_summary.parquet"
+  stability_summary_name: "s02_stability_summary.parquet"
+  rolling_summary_name: "s02_rolling_summary.parquet"
+  temporal_instability_zones_name: "s02_temporal_instability_zones.parquet"
+  acf_summary_name: "s02_acf_summary.parquet"
+  dependence_tests_name: "s02_dependence_tests_summary.parquet"
+  manifest_name: "s02_analysis_manifest.json"
+
+force_rebuild: false

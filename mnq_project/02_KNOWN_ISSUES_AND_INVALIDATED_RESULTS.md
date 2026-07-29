@@ -672,6 +672,19 @@ Especialmente afectados:
 - comparaciones de estabilidad entre regímenes;
 - resultados que justificaron `regime_3`.
 
+**Actualización (S02 v2 — APROBADO):**
+
+```text
+RESUELTO. S02 v2 usa regime_label de S01 v2 (Regular 10:30-14:59, Closing
+15:00-16:00, sin ruta default, sin "Overnight" incluyendo la barra 16:00).
+Distribución corregida sobre full_day_eligible: Early_Premarket 34,73%,
+Premarket 8,68%, Opening 8,68%, Regular 39,07%, Closing 8,83% (vs.
+histórico contaminado: Regular 43,42%, "Overnight" 34,88% incluyendo
+16:00, Closing 4,34%). Todas las estadísticas por régimen (s02_regime_distribution,
+s02_window_metrics_summary, s02_stability_summary, ACF/Ljung-Box por
+régimen) se regeneraron contra el régimen vigente.
+```
+
 ---
 
 ### Problema S02-02 — Asimetría de ventanas
@@ -692,6 +705,19 @@ no invalida el cálculo
 requiere documentación explícita
 ```
 
+**Actualización (S02 v2 — APROBADO):**
+
+```text
+RESUELTO Y AMPLIADO. La convención se mantuvo sin cambios (histórica:
+t-h+1...t, h barras, h-1 intervalos; futura: t+1...t+h, h barras, h
+intervalos) y quedó documentada explícitamente en la notebook v2 (sección 8)
+y en el reporte. Se agregó ademas una cuarta condicion de validez ausente en
+v1: la ventana debe permanecer dentro de un unico contract (bloqueante,
+verificado sobre las 25 transiciones reales de contrato: 0 caen dentro de un
+mismo consecutive_segment_id, por lo que el nuevo bloqueo no reduce validez
+adicional sobre este dataset).
+```
+
 ---
 
 ### Problema S02-03 — “Cambios estructurales” no formales
@@ -706,6 +732,18 @@ diagnóstico EXPLORATORIO
 
 No debe presentarse como prueba estadística de quiebre estructural.
 
+**Actualización (S02 v2 — APROBADO):**
+
+```text
+RESUELTO. La sección se renombró a "diagnóstico de inestabilidad temporal"
+(s02_temporal_instability_zones.parquet); el texto de la notebook v2 y del
+reporte usan exclusivamente "inestabilidad temporal" / "cambio de
+distribución", nunca "cambio estructural" como conclusión. No se incorporó
+ninguna prueba formal de ruptura (Chow/CUSUM/Bai-Perron) en esta etapa, por
+decisión explícita del usuario; queda como posible anexo futuro, no como
+parte de S02.
+```
+
 ---
 
 ### Problema S02-04 — Features exploratorias reemplazadas
@@ -717,6 +755,16 @@ El script de features de S02 fue superado por Stage 05.
 ```text
 VÁLIDO COMO ANTECEDENTE
 NO ES PIPELINE OFICIAL
+```
+
+**Actualización (S02 v2 — APROBADO):**
+
+```text
+RESUELTO. El generador exploratorio de features (build_mnq_candidate_features
+y sus dos archivos de salida) NO se ejecuta ni se reproduce en S02 v2; queda
+unicamente dentro de la notebook historica v1 (intacta, no modificada) como
+antecedente legacy fuera del pipeline productivo. S02 v2 no genera
+mnq_candidate_feature_engineering.py ni mnq_candidate_feature_groups.json.
 ```
 
 ---
@@ -742,6 +790,110 @@ definición histórica AMBIGUA
 ```
 
 Debe unificarse antes de reutilizar la feature.
+
+**Actualización (S02 v2 — APROBADO):**
+
+```text
+RESUELTO. Nombres inequivocos en todo el codigo y en todos los artefactos:
+body_signed_pts (= close - open, con signo) y body_abs_pts (= abs(close -
+open)). "body_pts" a secas no aparece en src/data/s02_intraday_analysis.py
+ni en ningun artefacto parquet (verificado por
+test_no_ohlcv_metric_uses_ambiguous_body_pts_name).
+```
+
+---
+
+## 4.3-bis. S02 v2 — Estado tras la reconstrucción (APROBADO — `APPROVED_WITH_KNOWN_LIMITATION`)
+
+**S02 v2 fue aprobado formalmente**, con una limitación técnica conocida
+declarada explícitamente (no bloqueante). Reemplaza funcionalmente el
+análisis exploratorio de S02 v1. La notebook histórica
+`S02_intraday_data_analysis.ipynb` (v1) **no fue modificada** y se conserva
+únicamente como evidencia histórica; la implementación vigente es
+`src/data/s02_intraday_analysis.py` + `config/s02_analysis_config.yaml` +
+`notebooks/S02_intraday_data_analysis_v2.ipynb`.
+
+```text
+Artefactos oficiales (data/02_intraday/): s02_summary.parquet,
+  s02_coverage_summary.parquet, s02_regime_distribution.parquet,
+  s02_ohlcv_stats_summary.parquet, s02_ohlcv_correlation.parquet,
+  s02_window_validity_summary.parquet, s02_rollover_window_audit.parquet,
+  s02_window_metrics_summary.parquet, s02_stability_summary.parquet,
+  s02_rolling_summary.parquet, s02_temporal_instability_zones.parquet,
+  s02_acf_summary.parquet, s02_dependence_tests_summary.parquet
+Manifiesto:  data/02_intraday/s02_analysis_manifest.json
+Reporte:     reports/stage_reports/S02_v2_report.md
+Pruebas:     26/26 unitarias + 12/12 integración (S02); 114/115 en la suite
+             completa del repo (única falla preexistente de S00, no
+             relacionada)
+```
+
+**Verificado por ejecución real (manifiesto + artefactos, no por
+inferencia):**
+
+```text
+Filas totales (población 'all'):     1.087.777
+Jornadas full_day_eligible:          1.482 (691 barras/día exactas)
+Filas full_day_eligible:              1.024.062 (idéntico al histórico v1)
+Filas partial_regime_eligible:           40.539 (119 días)
+Transiciones de contrato reales:            25
+Transiciones dentro de un mismo segmento:    0
+Validez de ventana (full_day_eligible, full): 30m 91,46% · 60m 82,78% · 90m 74,10%
+```
+
+**Validación focalizada post-aprobación inicial** (antes del cierre
+documental) verificó tres posibles inconsistencias:
+
+```text
+1. Validez de ventanas: sin error de calculo ni de artefacto (las 9 filas de
+   s02_window_validity_summary.parquet coinciden exactamente con la formula
+   teorica). El unico problema era una redaccion ambigua en un resumen de
+   cierre que mezclaba window_type distintos bajo una sola linea "30/60/90m";
+   corregido en el reporte.
+2. Closing / h=90: sin restriccion implicita de regimen (confirmado por
+   inspeccion de codigo: build_window_validity nunca lee regime_id). 90.402
+   ventanas historicas validas (100%), 0 futuras validas -- causa exacta
+   confirmada: "insufficient_bars" (el dia termina antes de completar 90
+   minutos futuros desde Closing), nunca "contract_change". Comportamiento
+   correcto, no un bug.
+3. ACF y Ljung-Box SI formaban pares espurios entre consecutive_segment_id
+   distintos (confirmado: 1.481 de 1.022.579 pares en lag=1, 14.810 de
+   1.022.570 en lag=10 cruzaban un limite de segmento). CORREGIDO: nuevas
+   funciones gap-aware que acumulan autocovarianzas solo dentro de cada
+   segmento. Efecto medido: cambios de ACF de 0,00001-0,0012; Ljung-Box
+   cambia entre -4,2% y +13,6% segun regimen, sin alterar ninguna
+   conclusion (los 15 p-values relevantes siguen p<10^-5 antes y despues).
+```
+
+**Limitación técnica conocida (declarada, no bloqueante):**
+
+```text
+ARCH-LM (statsmodels.stats.diagnostic.het_arch) NO es gap-aware: arma su
+matriz de regresores lageados sobre el array completo sin conocer limites
+de consecutive_segment_id -- la misma contaminacion que tenia Ljung-Box
+antes de esta correccion. Sus resultados son UNICAMENTE diagnosticos
+exploratorios sobre heterocedasticidad condicional y NO deben usarse como
+evidencia definitiva ni como criterio de seleccion de features o modelos.
+Su correccion (reimplementacion manual, no es un simple reescalado como la
+ACF) queda como tarea de mantenimiento metodologico posterior.
+```
+
+**Pendiente, no bloqueante para la aprobación:**
+
+```text
+Zona horaria de origen y timestamp_semantics: sin confirmacion documental
+  (heredado de S00/S01, S02 no lo resuelve).
+244 jornadas partial_undetermined + 11 no_data_undetermined: causa sin
+  determinar (heredado de S01).
+Auditoria general de rollover (Fase 4 del rebuild plan): S02 v2 solo aporto
+  el impacto a nivel de ventana (0 transiciones intra-segmento); la
+  auditoria completa de las 25 transiciones crudas sigue pendiente como
+  etapa separada.
+ARCH-LM no gap-aware (ver limitacion arriba).
+```
+
+Detalle completo en `reports/stage_reports/S02_v2_report.md` y
+`01_CURRENT_DECISIONS.md §33`.
 
 ---
 
@@ -1652,6 +1804,12 @@ Pueden conservarse, con sus advertencias:
 - no cruzar jornadas;
 - existencia de cambios de distribución.
 
+**Superado por S02 v2 (APROBADO):** todo lo anterior fue regenerado y
+confirmado contra el dataset y régimen vigentes en
+`reports/stage_reports/S02_v2_report.md` y `01_CURRENT_DECISIONS.md §33`;
+ya no es solo antecedente exploratorio, es resultado oficial vigente
+(con la limitación conocida de ARCH-LM no gap-aware, declarada en §4.3-bis).
+
 ### S03
 
 - metodología de excursiones futuras;
@@ -1708,7 +1866,7 @@ mnq_intraday_summary.json
 Luego, por dependencia:
 
 ```text
-S02:
+S02: REGENERADO Y APROBADO (S02 v2, ver §4.3-bis y 01_CURRENT_DECISIONS.md §33)
 análisis por régimen
 ventanas y resúmenes dependientes del dataset
 ```
