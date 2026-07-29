@@ -929,3 +929,52 @@ Antes de entrenar modelos definitivos deben quedar cerrados:
 15. reglas para no reutilizar evaluación externa.
 
 Solo después debe reconstruirse Stage 07 y comenzar la comparación definitiva de modelos.
+
+---
+
+## 31. Estado vigente de S00 (APROBADO — S00 v2)
+
+S00 fue reconstruido y aprobado formalmente. Esta sección fija cuál es el
+artefacto de entrada vigente para cualquier trabajo posterior (incluido el
+diseño de S01).
+
+```text
+Artefacto crudo vigente:   data/01_raw/mnq_raw_v2.parquet
+Manifiesto autoritativo:   data/01_raw/mnq_raw_v2_manifest.json
+Summary:                    data/01_raw/mnq_raw_v2_summary.json
+Catálogo de gaps:           data/01_raw/mnq_raw_v2_gaps.parquet
+Implementación:              src/data/s00_raw_ingestion.py
+Notebook vigente:            notebooks/S00_raw_data_preparation_v2.ipynb
+Pruebas:                     35/35 aprobadas (25 unitarias + 10 de integración)
+Filas:                       2.172.640
+Filas rechazadas:            0
+```
+
+`data/01_raw/mnq_raw.parquet` (nombre histórico, sin sufijo) **no existe y
+no debe asumirse como artefacto vigente.** `notebooks/S00_raw_data_preparation.ipynb`
+(v1, sin sufijo) **no fue modificada** y se conserva únicamente como
+evidencia histórica — no debe ejecutarse como parte del pipeline vigente.
+
+Decisiones confirmadas y vigentes sobre el dataset crudo:
+
+```text
+timestamps: tz-naive (sin conversión de zona horaria en S00)
+timezone_assumption: UTC — INFERIDO, NO CONFIRMADO DOCUMENTALMENTE
+timestamp_semantics (inicio vs. cierre de barra): NO CONFIRMADO
+price_type: "Last" — inferido solo del nombre de archivo, sin confirmación del proveedor
+```
+
+Pendientes que **no bloquean** la aprobación de S00, pero sí deben
+resolverse antes de tratar el dataset como completamente auditado:
+
+```text
+Gap interno MNQM23 (2023-04-05 18:03 → 2023-04-16 14:18, ~260h15min): NO_RESUELTO
+Gap de transición H25→M25 (2025-03-21 13:30 → 2025-04-06 08:42, ~15d19h12min): NO_RESUELTO
+Confirmación documental de zona horaria de origen: PENDIENTE
+Chequeo automatizado de solapamiento de intervalos entre archivos: MEJORA MENOR PENDIENTE
+  (verificado manualmente en la auditoría — 0 solapamientos — pero no
+  automatizado dentro de s00_raw_ingestion.py)
+```
+
+Detalle completo: `reports/stage_reports/S00_v2_report.md` y
+`02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.1-bis`.

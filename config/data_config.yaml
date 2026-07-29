@@ -1,0 +1,74 @@
+# Configuración central mínima para S00 v2 (ingestión cruda MNQ).
+# No incluye calendario, régimen, folds ni nada de S01 en adelante — eso
+# pertenece a una fase de gobernanza posterior (03_REBUILD_PLAN.md, Fase 1).
+
+pipeline_version: "s00_v2"
+
+source:
+  path: "data/00_source"
+  # Nombre completo estricto: <orden 2 dígitos>_mnq_<mes 03|06|09|12>_<año 2 dígitos>.Last.txt
+  # No se usa un glob laxo (*.txt): cualquier archivo que no calce este patrón,
+  # o cualquier hueco/duplicado en <orden>, detiene el pipeline.
+  filename_regex: '^(\d{2})_mnq_(03|06|09|12)_(\d{2})\.Last\.txt$'
+  expected_count: 26
+  expected_order: "consecutivo desde 00, sin huecos"
+  delimiter: ";"
+  columns: [datetime, open, high, low, close, volume]
+  timestamp_format: "%Y%m%d %H%M%S"
+  contract_month_map:
+    "03": "H"
+    "06": "M"
+    "09": "U"
+    "12": "Z"
+  instrument: "MNQ"
+
+artifacts:
+  raw_dir: "data/01_raw"
+  parquet_name: "mnq_raw_v2.parquet"
+  summary_name: "mnq_raw_v2_summary.json"
+  manifest_name: "mnq_raw_v2_manifest.json"   # fuente autoritativa de hashes/staleness
+  gaps_name: "mnq_raw_v2_gaps.parquet"        # catálogo completo de gaps, 1 fila por gap
+  source_manifest_csv: "manifests/s00_source_manifest.csv"  # vista derivada, no autoritativa
+
+timezone:
+  timezone_stored: null
+  timezone_assumption: "UTC"
+  timezone_evidence: "inferred_not_confirmed"
+  timestamp_semantics: "unknown_not_confirmed"  # ¿inicio o cierre de barra? no asumido
+
+bar:
+  bar_interval: "1_minute"
+  price_type: "Last"
+  price_type_evidence: "inferred_from_filename"  # el nombre de archivo contiene ".Last"; sin confirmación documental del proveedor
+
+validation:
+  # S00 no tiene autoridad para descartar/corregir filas: cualquier fila que
+  # falle schema/parseo/OHLCV detiene la generación del artefacto.
+  on_invalid_row: "abort"
+  checks:
+    - schema
+    - parsing
+    - timestamps
+    - monotonicity
+    - global_duplicates
+    - duplicates_by_timestamp_and_contract
+    - nulls
+    - infinites
+    - positive_prices
+    - non_negative_volume
+    - integer_volume
+    - ohlc_invariants
+    - exact_duplicate_rows
+    - empty_files
+    - contract_transitions
+    - gaps_internal_and_external
+
+gaps:
+  # S00 no confirma zona horaria ni tiene calendario de mercado: no clasifica
+  # gaps como feriado/mantenimiento/jornada de trading de forma definitiva.
+  # Solo registra evidencia estructural + una interpretación provisional bajo
+  # la hipótesis de que el índice fuera UTC.
+  evidence_levels: ["structural_only", "provisional_pattern_match", "unconfirmed"]
+  extraordinary_threshold_hours: 70  # por encima de esto y fuera del patrón semanal típico, se marca para revisión manual
+
+force_rebuild: false

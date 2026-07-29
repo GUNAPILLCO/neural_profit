@@ -128,6 +128,15 @@ dataset consolidado: VÁLIDO COMO ANTECEDENTE
 
 Reescribir S00 para describir únicamente la ingestión cruda.
 
+**Actualización (S00 v2 — APROBADO):**
+
+```text
+RESUELTO. notebooks/S00_raw_data_preparation_v2.ipynb es una notebook delgada
+que delega toda la lógica a src/data/s00_raw_ingestion.py; no describe
+operaciones que no ejecuta. La notebook v1 se conserva sin modificar, solo
+como evidencia histórica.
+```
+
 ---
 
 ### Problema S00-02 — Índice tz-naive
@@ -151,6 +160,22 @@ artefacto crudo: UTILIZABLE CON AUDITORÍA
 
 Confirmar la zona horaria mediante configuración de NinjaTrader, exportación o proveedor.
 
+**Actualización (S00 v2 — APROBADO):**
+
+```text
+NO RESUELTO, PERO CORREGIDO DOCUMENTALMENTE. El índice de mnq_raw_v2.parquet
+sigue siendo tz-naive (no se aplicó tz_localize ni tz_convert, por decisión
+de alcance de S00). config/data_config.yaml, mnq_raw_v2_manifest.json y
+mnq_raw_v2_summary.json declaran explícitamente:
+  timezone_stored: null
+  timezone_assumption: "UTC"
+  timezone_evidence: "inferred_not_confirmed"
+A diferencia del summary de S00 v1 (que localizaba el índice a UTC solo para
+el reporte y podía sugerir tz-aware), el summary de S00 v2 no afirma UTC
+como confirmado. La confirmación documental contra la fuente/proveedor
+sigue pendiente y no se resuelve con los datos disponibles.
+```
+
 ---
 
 ### Problema S00-03 — Nomenclatura de contratos inconsistente
@@ -172,6 +197,17 @@ problema documental y de portabilidad
 
 Elegir una convención única y conservar metadata de contrato completa.
 
+**Actualización (S00 v2 — APROBADO):**
+
+```text
+RESUELTO. Una única función unificada extrae instrument/contract/contract_full
+desde el nombre de archivo (sin duplicación). El dataset persistido conserva
+el formato corto vigente (H20, M20, U20, Z20) para no romper el contrato de
+entrada actual de S01. instrument ("MNQ") y contract_full ("MNQH20") quedan
+disponibles como metadata separada en mnq_raw_v2_manifest.json y
+manifests/s00_source_manifest.csv, no en el dataset fila a fila.
+```
+
 ---
 
 ### Problema S00-04 — Chequeo diario incorrecto
@@ -185,6 +221,15 @@ diagnóstico INVALIDADO
 ```
 
 La ausencia de timestamps duplicados sigue siendo un control válido.
+
+**Actualización (S00 v2 — APROBADO):**
+
+```text
+RESUELTO. El chequeo de ">500 filas por día" no existe en
+src/data/s00_raw_ingestion.py. S00 v2 valida duplicados exactos de fila y
+duplicados por (timestamp, contract) mediante comparación explícita, no
+mediante un umbral de conteo diario.
+```
 
 ---
 
@@ -207,6 +252,100 @@ Determinar si se trata de:
 - error de exportación;
 - periodo sin datos;
 - cambio de contrato mal documentado.
+
+**Actualización (S00 v2 — APROBADO):**
+
+```text
+SIGUE NO RESUELTO. Cuantificado con precisión: 15d19h12min entre
+2025-03-21 13:30:00 (fin de H25) y 2025-04-06 08:42:00 (inicio de M25),
+15 jornadas calendario completas sin datos. Clasificado formalmente en
+data/01_raw/mnq_raw_v2_gaps.parquet como:
+  gap_type_structural: inter_contract
+  evidence_level: unconfirmed
+Interpretación provisional bajo hipótesis UTC: "sin patrón estructural
+reconocido en S00; requiere auditoría adicional". No se rellenó, interpoló
+ni eliminó ningún dato. La causa (archivo faltante, cambio de proveedor,
+error de exportación, periodo real sin datos) sigue sin determinarse.
+```
+
+---
+
+### Problema S00-06 — Gap interno en MNQM23 (hallazgo nuevo de S00 v2)
+
+La auditoría que precedió a S00 v2 encontró un segundo gap extraordinario,
+no documentado previamente en ningún archivo del proyecto: un salto de
+**260h15min (~10d20h15min)** dentro de un único archivo/contrato —
+`13_mnq_06_23.Last.txt` (M23) — entre 2023-04-05 18:03:00 y
+2023-04-16 14:18:00, con 10 jornadas calendario completas sin datos. A
+diferencia de S00-05, no es una transición entre archivos (`intra_file`, no
+`inter_contract`).
+
+**Estado:**
+
+```text
+hallazgo nuevo, no resuelto
+```
+
+Clasificado en `data/01_raw/mnq_raw_v2_gaps.parquet` como:
+
+```text
+gap_type_structural: intra_file
+evidence_level: unconfirmed
+```
+
+**Acción:**
+
+Misma naturaleza que S00-05: determinar si se trata de ausencia real de
+datos en la fuente, error de exportación, o un evento legítimo del
+proveedor. No bloquea la aprobación de S00 v2 (se documenta y se avanza),
+pero debe auditarse antes de construir features/targets que crucen ese
+intervalo.
+
+---
+
+## 4.1-bis. S00 v2 — Estado tras la reconstrucción (APROBADO)
+
+**S00 v2 fue aprobado formalmente.** Reemplaza funcionalmente la
+consolidación cruda de S00 v1 como fuente para S01 en adelante. La notebook
+histórica `S00_raw_data_preparation.ipynb` (v1) **no fue modificada** y se
+conserva únicamente como evidencia histórica; la implementación vigente es
+`src/data/s00_raw_ingestion.py` + `notebooks/S00_raw_data_preparation_v2.ipynb`.
+
+```text
+Artefacto principal:      data/01_raw/mnq_raw_v2.parquet
+Filas:                     2.172.640
+Filas rechazadas:          0
+Columnas:                  open, high, low, close, volume, contract
+Índice:                    DatetimeIndex, tz-naive
+Pruebas:                   35/35 aprobadas (25 unitarias + 10 de integración)
+```
+
+**Confirmado / persistido correctamente:**
+
+```text
+timestamps tz-naive (sin conversión de zona horaria en S00, por decisión de alcance)
+timezone_assumption = UTC, declarado explícitamente como inferido, NO confirmado
+timestamp_semantics (inicio vs. cierre de barra) = explícitamente no confirmado
+price_type = "Last", inferido solo del nombre de archivo, sin confirmación del proveedor
+```
+
+**Pendiente, no bloqueante para la aprobación:**
+
+```text
+Gap M23 (interno, S00-06): no_resuelto
+Gap H25→M25 (transición, S00-05): no_resuelto
+Confirmación documental de zona horaria de origen: sigue pendiente
+Chequeo automatizado de solapamiento de intervalos entre archivos: mejora
+  menor pendiente (la auditoría previa lo verificó manualmente — 0
+  solapamientos — pero esa verificación no quedó automatizada dentro de
+  s00_raw_ingestion.py)
+```
+
+**Resuelto respecto a v1:** S00-01 (documentación desalineada), S00-03
+(nomenclatura de contratos duplicada/inconsistente), S00-04 (diagnóstico de
+">500 filas/día" inválido). Ver actualizaciones en cada problema arriba.
+
+Detalle completo en `reports/stage_reports/S00_v2_report.md`.
 
 ---
 

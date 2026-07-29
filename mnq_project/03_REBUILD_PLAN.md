@@ -408,6 +408,32 @@ reports/stage_reports/S00_report.md
 - timezone sigue documentado como no confirmado si no existe evidencia;
 - todo gap queda explicado o marcado como pendiente.
 
+## Estado: APROBADO (S00 v2)
+
+Implementado con sufijo `_v2` para no sobrescribir nombres oficiales previos
+mientras no existía artefacto real que proteger:
+
+```text
+data/01_raw/mnq_raw_v2.parquet
+data/01_raw/mnq_raw_v2_summary.json
+data/01_raw/mnq_raw_v2_manifest.json   (autoritativo para hashes/staleness)
+data/01_raw/mnq_raw_v2_gaps.parquet    (catálogo completo de gaps)
+manifests/s00_source_manifest.csv      (vista derivada, no autoritativa)
+reports/stage_reports/S00_v2_report.md
+```
+
+Resultado: 2.172.640 filas, 0 rechazadas, 35/35 pruebas aprobadas (25
+unitarias + 10 de integración sobre el corpus real). Criterio de aprobación
+cumplido: los 26 archivos fuente están inventariados con hash SHA-256;
+ninguna transformación temporal se aplicó (tz-naive, sin `tz_localize` ni
+`tz_convert`); `timezone_assumption=UTC` queda documentado explícitamente
+como no confirmado; todos los gaps quedan catalogados en
+`mnq_raw_v2_gaps.parquet`, y los dos casos extraordinarios (gap interno
+MNQM23 y gap de transición H25→M25) quedan marcados `no_resuelto`, no
+resueltos por conveniencia. `notebooks/S00_raw_data_preparation.ipynb` (v1)
+no fue modificada y se conserva como evidencia histórica. Detalle completo
+en `01_CURRENT_DECISIONS.md §31` y `02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.1-bis`.
+
 ---
 
 # 8. Fase 3 — S01 Intraday Data Preparation

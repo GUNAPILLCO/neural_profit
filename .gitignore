@@ -1,5 +1,6 @@
-# Datos locales y archivos generados
-data/
+# Datos locales y archivos generados (solo el data/ de la raiz del proyecto,
+# no cualquier carpeta llamada "data" en profundidad, p.ej. src/data/)
+/data/
 #notebooks/
 
 # Libros no versionados

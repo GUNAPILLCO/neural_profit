@@ -1,0 +1,22 @@
+# Definición mínima y reproducible del entorno conda `stage_02`, usado para
+# ejecutar S00 v2 (ingestión cruda MNQ). No es un `conda env export` completo:
+# incluye únicamente lo que S00 v2 realmente importa.
+#
+# python/pandas/pyarrow/ipykernel ya estaban instalados en stage_02 antes de
+# esta implementación (verificado con `conda run -n stage_02 python -c
+# "import pandas, pyarrow"` durante la fase de planificación).
+#
+# pytest y pyyaml se instalaron vía pip dentro de stage_02 el 2026-07-28:
+#   conda run -n stage_02 python -m pip install pytest pyyaml
+name: stage_02
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pandas=3.0.3
+  - pyarrow=24.0.0
+  - ipykernel
+  - pip
+  - pip:
+      - pytest==9.1.1
+      - pyyaml==6.0.3

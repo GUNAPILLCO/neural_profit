@@ -165,3 +165,64 @@ y encargarse de:
 4. Reemplazar o eliminar el chequeo de días con más de 500 registros.
 5. Documentar el gap previo a `MNQM25`.
 6. Confirmar valores faltantes y consistencia OHLCV mediante validaciones explícitas.
+
+Todo lo anterior en este documento describe **exclusivamente la notebook v1**
+(`S00_raw_data_preparation.ipynb`), que no fue modificada y se conserva como
+evidencia histórica. El cierre real de la etapa se realizó mediante una
+implementación nueva (v2, no una corrección de la notebook v1) — ver §11.
+
+---
+
+## 11. S00 v2 — Cierre aprobado (actualización)
+
+**S00 v2 fue aprobado formalmente.** Es la implementación vigente; la
+notebook v1 y este documento hasta el §10 quedan como registro histórico de
+lo que motivó la reconstrucción.
+
+```text
+Implementación:    src/data/s00_raw_ingestion.py
+Notebook vigente:  notebooks/S00_raw_data_preparation_v2.ipynb
+Config:            config/data_config.yaml
+Artefacto crudo:   data/01_raw/mnq_raw_v2.parquet
+Manifiesto:        data/01_raw/mnq_raw_v2_manifest.json (autoritativo)
+Summary:           data/01_raw/mnq_raw_v2_summary.json
+Gaps:              data/01_raw/mnq_raw_v2_gaps.parquet
+Reporte:           reports/stage_reports/S00_v2_report.md
+Pruebas:           35/35 aprobadas (25 unitarias + 10 de integración)
+Filas:             2.172.640
+Filas rechazadas:  0
+```
+
+### Resolución de los 6 pendientes de §10
+
+| # | Pendiente (v1) | Resolución en S00 v2 |
+|---|---|---|
+| 1 | Markdown no coincide con el código | Resuelto: la notebook v2 es delgada, sin bloques de texto que describan operaciones no implementadas |
+| 2 | Nomenclatura de `contract` inconsistente | Resuelto: función única de extracción; dataset conserva formato corto (`H20`), `instrument`/`contract_full` quedan en el manifiesto, no en el dataset |
+| 3 | Aclarar tz-naive/UTC | Resuelto documentalmente: `timezone_assumption: "UTC"`, `timezone_evidence: "inferred_not_confirmed"` explícitos en config/manifest/summary; el índice sigue tz-naive, sin conversión |
+| 4 | Chequeo de >500 filas/día | Resuelto: no existe en S00 v2; se reemplazó por validaciones explícitas de esquema, OHLC, nulos, infinitos y duplicados |
+| 5 | Gap previo a `MNQM25` | Cuantificado y clasificado (`no_resuelto`, `evidence_level=unconfirmed`) en `mnq_raw_v2_gaps.parquet`; la causa raíz **sigue sin determinarse** |
+| 6 | Confirmar nulos/OHLCV explícitamente | Resuelto: validado sobre las 2.172.640 filas reales, 0 rechazos, con pruebas de regresión para cada invariante |
+
+### Hallazgo nuevo no cubierto por los 6 pendientes de v1
+
+Un segundo gap extraordinario, no documentado antes de esta reconstrucción:
+gap interno de ~260h15min dentro de `13_mnq_06_23.Last.txt` (contrato M23),
+entre 2023-04-05 18:03:00 y 2023-04-16 14:18:00. Clasificado `no_resuelto`
+en `mnq_raw_v2_gaps.parquet`, igual que el gap de `MNQM25`.
+
+### Pendiente que sigue abierto (no bloqueante)
+
+```text
+Confirmación documental de zona horaria de origen (proveedor/exportación)
+Semántica del timestamp (inicio vs. cierre de barra) — no confirmada
+Gap interno MNQM23 — no_resuelto
+Gap de transición H25→M25 — no_resuelto
+Chequeo automatizado de solapamiento de intervalos entre archivos —
+  mejora menor pendiente (verificado manualmente en la auditoría, no
+  automatizado dentro del módulo)
+```
+
+Detalle completo en `reports/stage_reports/S00_v2_report.md`,
+`01_CURRENT_DECISIONS.md §31` y
+`02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.1-bis`.
