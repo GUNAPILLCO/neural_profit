@@ -256,7 +256,7 @@ Determinar si se trata de:
 **Actualización (S00 v2 — APROBADO):**
 
 ```text
-SIGUE NO RESUELTO. Cuantificado con precisión: 15d19h12min entre
+SIGUE NO RESUELTO [estado histórico]. Cuantificado con precisión: 15d19h12min entre
 2025-03-21 13:30:00 (fin de H25) y 2025-04-06 08:42:00 (inicio de M25),
 15 jornadas calendario completas sin datos. Clasificado formalmente en
 data/01_raw/mnq_raw_v2_gaps.parquet como:
@@ -267,6 +267,16 @@ reconocido en S00; requiere auditoría adicional". No se rellenó, interpoló
 ni eliminó ningún dato. La causa (archivo faltante, cambio de proveedor,
 error de exportación, periodo real sin datos) sigue sin determinarse.
 ```
+
+**RESUELTO (2026-07-31):** `data/00_source/20_mnq_03_25.Last.txt` y
+`21_mnq_06_25.Last.txt` se actualizaron por fuera de este pipeline. En los
+datos vigentes, H25 cubre 2024-12-12→2025-03-22 y M25 cubre
+2025-03-13→2025-06-22: **se solapan** (no hay ningún gap entre ambos). El
+gap descrito arriba era un artefacto de una exportación de fuente
+incompleta, no un fenómeno estructural del mercado. `mnq_raw_v2_gaps.parquet`
+ya no contiene ninguna entrada H25↔M25. Este mismo solapamiento es el que
+usa S01 v2 para confirmar el rollover H25→M25 (señal 2025-03-18, activo
+desde 2025-03-19 — ver `reports/stage_reports/S01_v2_report.md §16`).
 
 ---
 
@@ -301,6 +311,15 @@ proveedor. No bloquea la aprobación de S00 v2 (se documenta y se avanza),
 pero debe auditarse antes de construir features/targets que crucen ese
 intervalo.
 
+**RESUELTO (2026-07-31):** `data/00_source/13_mnq_06_23.Last.txt` se
+actualizó por fuera de este pipeline (87.931 filas vs. 78.856 antes). El
+salto máximo dentro de M23 en los datos vigentes es de ~57h (fin de semana
+ordinario), muy por debajo del umbral de 100h que definía este hallazgo
+como extraordinario. `mnq_raw_v2_gaps.parquet` ya no contiene ningún gap
+intra-file de M23 en el bucket `>100h`. La causa del gap original (falla
+de exportación en la fuente) no fue investigada retroactivamente porque el
+gap ya no existe en los datos que consume el pipeline.
+
 ---
 
 ## 4.1-bis. S00 v2 — Estado tras la reconstrucción (APROBADO)
@@ -332,14 +351,18 @@ price_type = "Last", inferido solo del nombre de archivo, sin confirmación del 
 **Pendiente, no bloqueante para la aprobación:**
 
 ```text
-Gap M23 (interno, S00-06): no_resuelto
-Gap H25→M25 (transición, S00-05): no_resuelto
+Gap M23 (interno, S00-06): RESUELTO 2026-07-31 (fuente actualizada, ya no existe)
+Gap H25→M25 (transición, S00-05): RESUELTO 2026-07-31 (fuente actualizada, ahora se solapan)
 Confirmación documental de zona horaria de origen: sigue pendiente
 Chequeo automatizado de solapamiento de intervalos entre archivos: mejora
   menor pendiente (la auditoría previa lo verificó manualmente — 0
   solapamientos — pero esa verificación no quedó automatizada dentro de
   s00_raw_ingestion.py)
 ```
+
+**Addendum (2026-07-31):** `data/00_source/` se actualizó por fuera de
+este pipeline (27 archivos, cobertura hasta 2026-07-31). Filas: 2.172.640
+→ 2.329.783. Ver `reports/stage_reports/S00_v2_report.md §12`.
 
 **Resuelto respecto a v1:** S00-01 (documentación desalineada), S00-03
 (nomenclatura de contratos duplicada/inconsistente), S00-04 (diagnóstico de
@@ -631,22 +654,41 @@ ventana 04:30-16:00 documentada explícitamente como decisión operativa
 **Pendiente, no bloqueante para la aprobación:**
 
 ```text
-244 jornadas partial_undetermined y 11 no_data_undetermined: CME_Equity
-  las marca como día de trading pero la cobertura no calza con ningún
-  patrón conocido — auditoría futura, no bloqueante
+274 jornadas partial_undetermined y 10 no_data_undetermined (cifras
+  actualizadas tras el addendum 2026-07-31, ver abajo): CME_Equity las
+  marca como día de trading pero la cobertura no calza con ningún patrón
+  conocido — auditoría futura, no bloqueante
 Patrón recurrente 16:20-16:30 (2019-2021): fuera de la ventana primaria,
   no afecta mnq_intraday_v2.parquet; relevante solo si se extiende la
   ventana más allá de las 16:00
 Discrepancia CME_Equity vs "CME Globex Equity" (1 día, 2025-01-09): no
   revalidada, se usó CME_Equity según lo aprobado
 Test global preexistente de S00 (tests/test_s00_integration.py::
-  test_never_writes_to_productive_raw_dir) falla porque asume
-  data/01_raw/ vacío; ya contiene los artefactos productivos de S00 v2.
-  No relacionado con S01 v2, no modificado (fuera del alcance de esta
-  etapa tocar pruebas de S00).
+  test_never_writes_to_productive_raw_dir): RESUELTO 2026-07-31 (ver
+  02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md, addendum S00 arriba).
 ```
 
 Detalle completo en `reports/stage_reports/S01_v2_report.md`.
+
+**Addendum (2026-07-31) — resolución de rollover:** S01 v2 no
+seleccionaba contrato: 23 fechas (de las 2.414) tenían dos contratos
+presentes simultáneamente dentro de la ventana, concentradas en las
+transiciones Z24→H25, H25→M25 y M26→U26. `resolve_rollovers()` ahora
+construye una serie con un único contrato por fecha (regla de sesión
+compartida completa + ≥55% de volumen del entrante, irreversible, sin
+mezclar contratos, sin promediar OHLCV, filas descartadas trazadas). Las
+2.414 fechas quedan reclasificadas: `full_coverage` 1.482→1.570,
+categoría nueva `early_close_eligible` (40 fechas, cierre anticipado
+verificado con 511 barras exactas 04:30-13:00 Y contra el calendario
+oficial `pandas_market_calendars` CME_Equity, no solo inferido por el
+patrón de barras). **Addendum posterior — regla de respaldo 11:** si el
+contrato activo tiene 0 barras una fecha pero el entrante sí tiene datos,
+se conserva la cobertura real del entrante solo para esa fecha
+(`active_contract_no_data_fallback_to_incoming`), sin adelantar el cruce
+formal. Detalle completo, incluida la regresión de las 3 transiciones
+confirmadas, los casos límite (2025-03-15 no confirma; 2026-06-11
+conserva M26; 2025-03-17 se resuelve por la regla de respaldo y queda
+`full_coverage`), en `reports/stage_reports/S01_v2_report.md §16`.
 
 ---
 
@@ -803,7 +845,7 @@ test_no_ohlcv_metric_uses_ambiguous_body_pts_name).
 
 ---
 
-## 4.3-bis. S02 v2 — Estado tras la reconstrucción (APROBADO — `APPROVED_WITH_KNOWN_LIMITATION`)
+## 4.3-bis. S02 v2 — Estado tras la reconstrucción (APROBADO — `APPROVED`)
 
 **S02 v2 fue aprobado formalmente**, con una limitación técnica conocida
 declarada explícitamente (no bloqueante). Reemplaza funcionalmente el
@@ -1611,6 +1653,31 @@ Los contratos se consolidaron, pero no existe una auditoría definitiva de todas
 ```text
 todo análisis sensible a niveles o diferencias entre contratos: COMPROMETIDO HASTA AUDITORÍA
 ```
+
+**Actualización (2026-07-31) — resolución en S01 v2:** la construcción de
+una serie principal con un único contrato por fecha (Fase 4 del plan,
+antes prevista como etapa separada) quedó implementada dentro de S01 v2
+(`resolve_rollovers`), no como notebook/artefacto separado
+`ROLL_AUDIT_report.md`. Las 26 transiciones de contrato del rango (27
+contratos, H20 a U26; conteo verificado programáticamente en
+`reports/stage_reports/s01_rollover_transition_audit.csv`, no a mano) se
+auditaron: 23 son handoffs limpios sin solapamiento real y 3
+(Z24→H25, H25→M25, M26→U26) tuvieron solapamiento real, confirmado por
+volumen y resueltas de forma irreversible y trazable (ver
+`reports/stage_reports/S01_v2_report.md §16`). Se agregó además una regla
+de respaldo (11: `active_contract_no_data_fallback_to_incoming`) para
+fechas donde el activo tiene exactamente 0 barras pero el entrante sí
+tiene datos — conserva la cobertura real del entrante solo esa fecha, sin
+adelantar el cruce formal (caso de regresión: `2025-03-17`). La
+validación de conservación (1.166.364 filas antes de resolver =
+1.152.510 resueltas + 13.854 descartadas) es bloqueante en el código
+productivo, no solo en pruebas. Esto resuelve la
+**selección de contrato** para la serie principal (ninguna secuencia
+downstream puede cruzar contrato dentro de una fecha). **No** implementa
+back-adjustment de precios ni un análisis de gap de precio en el momento
+del roll — eso sigue fuera de alcance, tal como lo pide la decisión
+vigente de §8 de `01_CURRENT_DECISIONS.md` ("no ajustar toda la serie de
+forma automática").
 
 ---
 

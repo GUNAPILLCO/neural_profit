@@ -307,7 +307,7 @@ def test_gaps_never_confirmed_evidence_level(tmp_path):
     )
     df = ing.concatenate_and_validate([ing.parse_source_file(infos[0], config)])
 
-    gaps_df = ing.compute_gaps(df)
+    gaps_df = ing.compute_gaps(df, infos)
 
     assert len(gaps_df) == 1
     assert gaps_df.iloc[0]["gap_type_structural"] == "intra_file"
@@ -323,12 +323,39 @@ def test_inter_contract_gap_detected_at_transition(tmp_path):
     dfs = [ing.parse_source_file(i, config) for i in infos]
     df = ing.concatenate_and_validate(dfs)
 
-    gaps_df = ing.compute_gaps(df)
+    gaps_df = ing.compute_gaps(df, infos)
 
     inter = gaps_df[gaps_df["gap_type_structural"] == "inter_contract"]
     assert len(inter) == 1
     assert inter.iloc[0]["source_file_left"] == "00_mnq_03_20.Last.txt"
     assert inter.iloc[0]["source_file_right"] == "01_mnq_06_20.Last.txt"
+
+
+def test_overlapping_contracts_same_timestamp_produce_no_gap(tmp_path):
+    # Durante un rollover, el contrato entrante puede tener barras con
+    # timestamps anteriores o iguales al ultimo timestamp del saliente.
+    # Eso es un solapamiento valido (ver S01, resolucion de rollover), no un
+    # gap: compute_gaps no debe emitir ninguna fila inter_contract aqui.
+    config = make_config()
+    source_dir = tmp_path / "00_source"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    write_file(source_dir, "00_mnq_03_20.Last.txt", [
+        "20200320 130000;100.0;100.5;99.5;100.25;10",
+        "20200320 130100;100.0;100.5;99.5;100.25;10",
+    ])
+    write_file(source_dir, "01_mnq_06_20.Last.txt", [
+        "20200320 130000;110.0;110.5;109.5;110.25;20",
+        "20200320 130100;110.0;110.5;109.5;110.25;20",
+    ])
+    infos = ing.validate_source_filenames(
+        source_dir, {**config, "source": {**config["source"], "expected_count": 2}}
+    )
+    dfs = [ing.parse_source_file(i, config) for i in infos]
+    df = ing.concatenate_and_validate(dfs)
+
+    gaps_df = ing.compute_gaps(df, infos)
+
+    assert (gaps_df["gap_type_structural"] == "inter_contract").sum() == 0
 
 
 # ---------------------------------------------------------------------------

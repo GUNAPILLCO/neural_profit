@@ -545,47 +545,100 @@ sin análisis: las 827 fechas no-`full_coverage` quedan clasificadas
 `01_CURRENT_DECISIONS.md §32` y
 `02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.2-bis`.
 
+**Addendum (2026-07-31):** `data/00_source` se actualizó (27 archivos,
+hasta 2026-07-31) y S01 v2 incorporó resolución de rollover (ver Fase 4
+más abajo, ahora ejecutada dentro de S01, no como etapa separada),
+verificación empírica de cierre anticipado, y una regla de respaldo
+(11: `active_contract_no_data_fallback_to_incoming` — si el activo tiene
+0 barras una fecha pero el entrante sí tiene datos, se conserva la
+cobertura real del entrante solo para esa fecha, sin adelantar el cruce
+formal; caso de regresión: `2025-03-17`). Resultado actualizado:
+1.152.510 filas, `full_coverage` = 1.570 × 691 = 1.084.870, categoría
+nueva `early_close_eligible` (40 fechas). El shape 1.482×691=1.024.062
+citado arriba queda como antecedente de la ejecución anterior a esta
+actualización de fuente. Detalle completo en
+`reports/stage_reports/S01_v2_report.md §16`.
+
 ---
 
 # 9. Fase 4 — Auditoría de rollover
 
-## Objetivo
+## Estado: IMPLEMENTADA DENTRO DE S01 v2 (2026-07-31), no como etapa separada
 
-Determinar si los cambios de contrato contaminan el pipeline.
+El objetivo de esta fase (impedir que un cambio de contrato contamine el
+pipeline sin una decisión explícita) se resolvió incorporando la
+resolución de rollover directamente en S01 v2 (`resolve_rollovers` en
+`src/data/s01_intraday_preparation.py`), en vez de crear una notebook y un
+`roll_audit.parquet` separados como preveía este plan originalmente. Se
+prefirió esta integración porque S01 es exactamente la etapa que decide
+qué contrato representa cada fecha, y separar esa decisión en una fase
+posterior habría permitido que `trading_day_audit_v2.parquet` clasificara
+fechas con más de un contrato sin que nada lo impidiera.
 
-## Acciones
+Cubre los puntos 1-4, 6 y 9 de las acciones originales (identificar
+saliente/entrante, localizar timestamps, gap temporal, cambio dentro de
+sesión, decidir tratamiento = "mantener serie con contrato único, sin
+ajuste de precio"). **No** cubre el punto 5 (gap de precio en el momento
+del roll) ni el 7-8 (medir ventanas/targets afectados aguas abajo) — eso
+sigue pendiente como auditoría separada si se necesita antes de construir
+features/targets que crucen fechas de rollover.
 
-Para cada transición:
+## Resultado (26 transiciones de contrato auditadas — 27 contratos, H20 a U26)
 
-1. identificar contrato saliente;
-2. identificar contrato entrante;
-3. localizar timestamps;
-4. calcular gap temporal;
-5. calcular gap de precio;
-6. comprobar cambio dentro o fuera de sesión;
-7. medir ventanas afectadas;
-8. medir targets potencialmente afectados;
-9. decidir tratamiento.
-
-## Opciones de tratamiento
+Conteo verificado programáticamente, no a mano — artefacto:
+`reports/stage_reports/s01_rollover_transition_audit.csv` (una fila por
+transición, con el número de fechas realmente compartidas entre cada par
+de contratos consecutivos).
 
 ```text
-excluir ventanas
-reiniciar rolling por contrato
-ajustar serie
-mantener sin ajuste
+23 transiciones: handoff limpio, CERO fechas con ambos contratos
+  presentes en los datos -- el contrato activo avanza sin ambigüedad que
+  resolver (no son solo "H20 hasta Z24": incluyen tambien M25->U25,
+  U25->Z25, Z25->H26 y H26->M26, entre las 3 transiciones con
+  solapamiento real).
+3 transiciones con solapamiento real, confirmadas por volumen sobre sesión
+  compartida completa (regla: >=55% del volumen compartido, sesión 691/691,
+  irreversible, sin doble confirmación):
+    Z24 -> H25: señal 2024-12-17, activo desde 2024-12-18 (share 69,10%)
+    H25 -> M25: señal 2025-03-18, activo desde 2025-03-19 (share 69,09%)
+    M26 -> U26: señal 2026-06-15, activo desde 2026-06-16 (share 76,44%)
+2 casos límite verificados: 2025-03-15 no confirma (sesión no completa);
+  2026-06-11 conserva el contrato saliente con su cobertura real (no se
+  mezcla ni se rellena con el entrante).
+Regla de respaldo 11 (active_contract_no_data_fallback_to_incoming): si
+  el activo tiene 0 barras una fecha pero el entrante si tiene datos, se
+  conserva la cobertura real del entrante SOLO esa fecha, sin adelantar
+  el contrato activo formal. Caso de regresion: 2025-03-17 (H25 activo
+  0 barras, M25 entrante 691 barras) queda full_coverage/full_day_eligible;
+  el cruce formal H25->M25 sigue confirmando el 2025-03-18, efectivo
+  desde el 2025-03-19.
 ```
 
-## Salidas
+Validación de conservación (bloqueante en código, no solo en pruebas):
+`1.166.364` filas antes de resolver rollover `= 1.152.510` resueltas `+ 13.854`
+descartadas — verificado dentro de `resolve_rollovers` y repetido al
+construir el manifest; hace fallar el pipeline si no coincide.
+
+## Salidas (nombres reales, dentro de S01 v2, no separadas)
 
 ```text
-data/02_intraday/roll_audit.parquet
-reports/stage_reports/ROLL_AUDIT_report.md
+data/02_intraday/rollover_events_v2.parquet          (3 transiciones confirmadas)
+data/02_intraday/rollover_ambiguous_dates_v2.parquet (25 fechas evaluadas, incluye la regla de respaldo)
+data/02_intraday/rollover_discarded_rows_v2.parquet  (13.854 filas descartadas, con motivo)
+data/02_intraday/consecutive_segments_v2.parquet     (segmentos por fecha)
+reports/stage_reports/s01_rollover_transition_audit.csv       (26 transiciones auditadas)
+reports/stage_reports/s01_rollover_overlap_dates_full_table.csv (25 fechas, detalle completo)
+reports/stage_reports/s01_early_close_dates_verified.csv       (40 fechas de cierre anticipado, verificadas contra calendario)
+reports/stage_reports/S01_v2_report.md §16
 ```
 
 ## Puerta de aceptación
 
-No avanzar a features o targets sensibles a niveles sin una decisión explícita.
+Cumplida para el propósito de esta fase: ninguna secuencia downstream
+puede cruzar contrato dentro de una fecha (verificado con invariante que
+hace fallar `build_trading_day_audit` si ocurre). **No** avanzar a
+back-adjustment de precios ni a un análisis de gap de precio en el roll
+sin una decisión explícita adicional — eso sigue sin decidirse.
 
 ---
 
@@ -630,7 +683,7 @@ data/02_intraday/s02_summary.parquet
 
 Debe quedar justificado si 30/60/90 continúan como horizontes candidatos.
 
-## Estado: `APPROVED_WITH_KNOWN_LIMITATION` (S02 v2)
+## Estado: `APPROVED` (S02 v2)
 
 Implementado siguiendo el mismo patrón de gobernanza que S00 v2/S01 v2:
 

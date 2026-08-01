@@ -72,13 +72,19 @@ Frecuencia: 1 minuto
 ### Cobertura cruda consolidada
 
 ```text
-Contratos: MNQH20 hasta MNQM26
-Archivos fuente: 26
-Filas consolidadas: 2.172.640
+Contratos: MNQH20 hasta MNQU26
+Archivos fuente: 27
+Filas consolidadas: 2.329.783
 Columnas: open, high, low, close, volume, contract
 Inicio: 2019-12-23 03:01
-Fin: 2026-04-17 20:18
+Fin: 2026-07-31 20:10
 ```
+
+Cifras vigentes desde la actualización de `data/00_source/` del
+2026-07-31 (27 archivos; ver `reports/stage_reports/S00_v2_report.md §12`
+y `01_CURRENT_DECISIONS.md §31`). Esa actualización también resolvió los
+dos gaps extraordinarios documentados como `no_resuelto` (S00-05 H25→M25,
+S00-06 M23 interno): ya no existen en los datos vigentes.
 
 El índice crudo es `tz-naive`, pero se interpreta como UTC. Esta interpretación debe confirmarse documentalmente con la configuración de exportación o con la fuente original.
 
@@ -170,6 +176,14 @@ Estado:
 - documentación y algunas validaciones deben corregirse;
 - existe un gap previo a `MNQM25` que debe auditarse.
 
+**Estado: `APPROVED` (S00 v2).** Reconstruido en `src/data/s00_raw_ingestion.py`
++ `notebooks/S00_raw_data_preparation_v2.ipynb` (ver `01_CURRENT_DECISIONS.md §31`).
+El gap previo a MNQM25 (S00-05) y un segundo gap interno hallado en MNQM23
+(S00-06) quedaron **resueltos el 2026-07-31**: `data/00_source/` se
+actualizó (27 archivos, cobertura hasta 2026-07-31) y ninguno de los dos
+gaps existe ya en los datos vigentes. Filas consolidadas: 2.329.783.
+Detalle en `reports/stage_reports/S00_v2_report.md §12`.
+
 ### S01 — Intraday Data Preparation
 
 Función:
@@ -194,6 +208,26 @@ Estado:
 - debe corregirse la clasificación de regímenes;
 - debe evitarse la reutilización silenciosa de un Parquet antiguo.
 
+**Estado: `APPROVED` (S01 v2).** Reconstruido en
+`src/data/s01_intraday_preparation.py` + `notebooks/S01_intraday_data_preparation_v2.ipynb`
+(ver `01_CURRENT_DECISIONS.md §32`). Calendario NASDAQ reemplazado por
+CME_Equity híbrido; ninguna jornada se elimina sin clasificar; regímenes
+corregidos; manifest autoritativo con hashes impide reutilización
+silenciosa. **Addendum 2026-07-31:** se agregó resolución de rollover
+(`resolve_rollovers`, construye la serie principal con un único contrato
+por fecha; 3 transiciones confirmadas por volumen — Z24→H25, H25→M25,
+M26→U26 — de 26 transiciones auditadas, 23 handoffs limpios) y
+verificación empírica de cierre anticipado (511 barras exactas + calendario
+oficial `pandas_market_calendars` CME_Equity, categoría
+`early_close_eligible`). **Addendum posterior:** regla de respaldo 11
+(`active_contract_no_data_fallback_to_incoming`): si el contrato activo
+tiene 0 barras una fecha pero el entrante sí tiene datos, se conserva la
+cobertura real del entrante solo para esa fecha, sin adelantar el cruce
+formal (caso de regresión: `2025-03-17` pasa a `full_coverage`, el cruce
+H25→M25 sigue confirmando el 2025-03-18/19). Filas: 1.152.510;
+`full_coverage`: 1.570 jornadas. Detalle en
+`reports/stage_reports/S01_v2_report.md §16`.
+
 ### S02 — Intraday Data Analysis
 
 Función:
@@ -215,7 +249,7 @@ Hallazgo principal:
 
 Los análisis globales siguen siendo útiles. Los análisis por régimen deben revisarse si se corrige S01.
 
-**Estado: `APPROVED_WITH_KNOWN_LIMITATION` (S02 v2).** Reconstruido contra el
+**Estado: `APPROVED` (S02 v2).** Reconstruido contra el
 régimen y dataset vigentes de S01 v2 (`notebooks/S02_intraday_data_analysis_v2.ipynb`
 + `src/data/s02_intraday_analysis.py`). Los análisis por régimen ya no
 requieren revisión: fueron regenerados contra `regime_label` corregido

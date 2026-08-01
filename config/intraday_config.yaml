@@ -49,6 +49,37 @@ regimes:
 regime_assignment:
   allow_default_route: false
 
+# Resolucion de rollover: construye una serie principal con un unico
+# contrato por fecha (ver reglas 1-10 del encargo de resolucion de
+# rollover). No selecciona contrato en S00 -- esto es exclusivo de S01.
+# Los solapamientos se detectan directamente en los datos (dos contratos
+# con barras dentro de 04:30-16:00 en la misma fecha); las fechas de
+# transicion NO se hardcodean, solo se usan como regresion en las pruebas.
+rollover:
+  min_incoming_share: 0.55
+  full_session_expected_minutes: 691  # debe calzar con window.expected_minutes
+  consecutive_confirmations_required: 1  # regla 7: no exige confirmacion doble
+  irreversible: true
+  # Regla 11 (respaldo, siempre activa, sin parametro propio): si el
+  # contrato activo tiene EXACTAMENTE 0 barras una fecha pero el entrante
+  # si tiene datos, se selecciona la cobertura real del entrante solo para
+  # esa fecha puntual (motivo active_contract_no_data_fallback_to_incoming).
+  # No mezcla contratos, no crea barras sinteticas, y NO adelanta el
+  # contrato activo -- el cruce formal sigue dependiendo exclusivamente de
+  # min_incoming_share sobre una sesion compartida completa. Ver
+  # src/data/s01_intraday_preparation.py, resolve_rollovers().
+
+# Cierre anticipado CME: se acepta day_status=partial_early_close_cme solo
+# si ademas de estar en el calendario CME_Equity, la cobertura observada
+# calza EXACTO con este patron (04:30-13:00, 511 barras consecutivas). Si
+# el calendario marca cierre anticipado pero los datos no calzan, la
+# jornada cae a partial_undetermined (no se asume el cierre anticipado sin
+# verificacion empirica).
+early_close:
+  end_time: "13:00:00"
+  end_minute: 780
+  expected_minutes: 511
+
 # La hipotesis UTC no se asume: se evalua programaticamente contra
 # America/New_York y America/Chicago (ver s01_intraday_preparation.py,
 # evaluate_timezone_hypotheses). timezone_selected se completa en el
@@ -79,17 +110,6 @@ calendar:
 # se marcan explicitamente day_status=*_gap_documented_s00,
 # is_model_eligible=false, s00_gap_reference=<gap_id>.
 known_gaps:
-  - gap_id: "s00_gap_M23"
-    gap_type: "intra_file"
-    source_file: "13_mnq_06_23.Last.txt"
-    start: "2023-04-05T18:03:00"
-    end: "2023-04-16T14:18:00"
-  - gap_id: "s00_gap_H25_M25"
-    gap_type: "inter_contract"
-    source_file_left: "20_mnq_03_25.Last.txt"
-    source_file_right: "21_mnq_06_25.Last.txt"
-    start: "2025-03-21T13:30:00"
-    end: "2025-04-06T08:42:00"
   - gap_id: "s01_pattern_1620_1630"
     gap_type: "recurrent_minor_pattern"
     note: "Gap recurrente ~16:20-16:30 ET, concentrado 2019-2021 (ver auditoria S01 v2 §16.5). Documentado, no bloqueante: cae dentro de la ventana primaria pero no afecta ningun regimen completo (Closing termina en 16:00)."
@@ -103,5 +123,9 @@ artifacts:
   trading_day_audit_name: "trading_day_audit_v2.parquet"
   regime_distribution_name: "regime_distribution_v2.parquet"
   tz_validation_name: "tz_validation_v2.json"
+  rollover_events_name: "rollover_events_v2.parquet"
+  rollover_ambiguous_dates_name: "rollover_ambiguous_dates_v2.parquet"
+  rollover_discarded_rows_name: "rollover_discarded_rows_v2.parquet"
+  consecutive_segments_name: "consecutive_segments_v2.parquet"
 
 force_rebuild: false

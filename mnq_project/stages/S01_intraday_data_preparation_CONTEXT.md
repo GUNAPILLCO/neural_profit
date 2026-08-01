@@ -319,3 +319,81 @@ test_s00_integration.py::test_never_writes_to_productive_raw_dir: falla
 Detalle completo en `reports/stage_reports/S01_v2_report.md`,
 `01_CURRENT_DECISIONS.md §32` y
 `02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.2-bis`.
+
+### Addendum (2026-07-31) — resolución de rollover y cierre anticipado verificado
+
+Tres piezas que faltaban en el cierre original de S01 v2 quedaron
+implementadas:
+
+1. **Resolución de rollover** (`resolve_rollovers`): antes, una fecha
+   podía tener más de una barra por minuto si dos contratos se solapaban.
+   `rollover_ambiguous_dates_v2.parquet` registra 25 fechas evaluadas (23
+   con ambos contratos presentes ese día + 2 fechas dentro de una ventana
+   de solapamiento aún no confirmada). Ahora la serie principal tiene
+   exactamente un contrato por fecha, decidido por sesión compartida
+   completa (691/691) + ≥55% de volumen del contrato entrante,
+   irreversible, sin mezclar contratos ni promediar OHLCV. **De las 26
+   transiciones de contrato del rango completo (27 contratos, H20 a
+   U26)**, 23 son handoffs limpios (cero fechas con ambos contratos
+   presentes) y 3 tuvieron solapamiento real y se confirmaron por
+   volumen: `Z24→H25` (señal 2024-12-17), `H25→M25` (señal 2025-03-18),
+   `M26→U26` (señal 2026-06-15) — conteo verificado programáticamente en
+   `reports/stage_reports/s01_rollover_transition_audit.csv`. Las filas
+   descartadas quedan trazadas en `rollover_discarded_rows_v2.parquet`
+   (13.854 filas, tras aplicar también la regla de respaldo 11 del punto
+   3), nunca borradas silenciosamente; la identidad
+   `1.166.364 = 1.152.510 + 13.854` se valida de forma bloqueante dentro
+   del código productivo (`resolve_rollovers` y `build_manifest`), no solo
+   en pruebas.
+2. **Cierre anticipado verificado**: `partial_early_close_cme` exige la
+   intersección de dos condiciones independientes: (a) la fecha está
+   declarada como cierre anticipado en el calendario oficial versionado
+   `pandas_market_calendars==5.4.0` (calendario `CME_Equity`, no una tabla
+   escrita a mano) y (b) 511 barras consecutivas 04:30-13:00 verificadas
+   contra los datos reales. Las 40 fechas resultantes están **todas**
+   confirmadas contra el calendario (lista completa en
+   `reports/stage_reports/s01_early_close_dates_verified.csv`), no
+   identificadas solo por el patrón de barras. Nueva categoría de
+   elegibilidad `early_close_eligible` (40 fechas), separada de
+   `full_day_eligible`, no incluida por defecto en la población
+   principal.
+
+3. **Regla de respaldo 11** (añadida en revisión posterior,
+   `active_contract_no_data_fallback_to_incoming`): si el contrato activo
+   tiene EXACTAMENTE 0 barras una fecha pero el entrante sí tiene datos,
+   se conserva la cobertura real del entrante solo para esa fecha
+   puntual — sin mezclar contratos, sin barras sintéticas, y **sin
+   adelantar formalmente el contrato activo** (el cruce sigue
+   dependiendo exclusivamente de la confirmación por volumen). Caso de
+   regresión obligatorio: `2025-03-17` (H25 activo con 0 barras, M25
+   entrante con 691 barras válidas) queda `full_coverage`/`full_day_eligible`;
+   el rollover formal H25→M25 sigue confirmando el `2025-03-18`, efectivo
+   desde el `2025-03-19` — no se adelanta.
+
+Junto con la actualización de `data/00_source/` (addendum en
+`S00_raw_data_preparation_CONTEXT.md`), el efecto combinado sobre la
+clasificación de las 2.414 fechas del rango es: `full_coverage`
+1.482→1.570 (1.024.062→1.084.870 filas), `not_model_eligible` ya no
+incluye ninguna fecha por gap documentado de S00 (los gaps S00-05/S00-06
+dejaron de existir en los datos). Tres estados, para no confundirlos:
+
+```text
+artefacto histórico (fuente vieja, sin rollover):        1.087.777 filas, 1.482 full_coverage
+datos actuales, ANTES de resolver rollover:               1.166.364 filas, 1.549 full_coverage
+resultado final (fuente actualizada + rollover resuelto,
+  incluida la regla de respaldo 11):                       1.152.510 filas, 1.570 full_coverage
+```
+
+El cambio 1.549→1.570 ocurre enteramente dentro de las 25 fechas
+ambiguas: 22 pasan a `full_coverage` (21 porque ya no tienen un segundo
+contrato mezclado, más `2025-03-17` gracias a la regla de respaldo 11),
+1 (`2025-03-16`, con solo 2 barras reales de M25) sigue sin serlo bajo
+cualquier lógica (+22−1=+21). Conservación exacta:
+`1.166.364 = 1.152.510 + 13.854` (bloqueante en código). Detalle
+completo, con la regresión de las 3 transiciones, la tabla de las 25
+fechas y los 3 casos que no quedan `full_coverage` (`2025-03-15`,
+`2025-03-16`, `2026-06-11`), en `reports/stage_reports/S01_v2_report.md §16`.
+
+**No modificado en este addendum:** S02 y etapas posteriores; back-adjustment
+de precios entre contratos (sigue fuera de alcance, ver
+`01_CURRENT_DECISIONS.md §8`).

@@ -143,48 +143,110 @@ def get_git_provenance(repo_root: Path) -> dict[str, Any]:
 # Validación de nombres de archivo fuente
 # ---------------------------------------------------------------------------
 
-def validate_source_filenames(source_dir: Path, config: dict[str, Any]) -> list[SourceFileInfo]:
+def validate_source_filenames(source_dir: Path,config: dict[str, Any],) -> list[SourceFileInfo]:
+    """
+    Detecta y valida automáticamente todos los archivos fuente disponibles.
+
+    No exige una cantidad fija de archivos, pero sí requiere que:
+    - Todos cumplan el patrón filename_regex.
+    - La numeración comience en 00.
+    - La numeración sea consecutiva, sin archivos intermedios faltantes.
+    """
+
+    # Obtiene la configuración correspondiente a los archivos fuente.
     src_cfg = config["source"]
+
+    # Compila la expresión regular utilizada para validar los nombres.
     pattern = re.compile(src_cfg["filename_regex"])
+
+    # Obtiene el mapa de meses contractuales: 03 -> H, 06 -> M, etc.
     month_map = src_cfg["contract_month_map"]
+
+    # Obtiene el instrumento configurado; por defecto utiliza MNQ.
     instrument = src_cfg.get("instrument", "MNQ")
-    expected_count = src_cfg["expected_count"]
 
-    entries = sorted(p for p in source_dir.iterdir() if p.is_file())
+    # Obtiene todos los archivos existentes en la carpeta fuente.
+    entries = sorted(
+        p for p in source_dir.iterdir()
+        if p.is_file()
+    )
 
-    unexpected = [p.name for p in entries if not pattern.match(p.name)]
+    # Detiene el pipeline si la carpeta no contiene archivos.
+    if not entries:
+        raise IngestionError(
+            f"No se encontraron archivos fuente en {source_dir}"
+        )
+
+    # Detecta archivos cuyos nombres no cumplen el patrón configurado.
+    unexpected = [
+        p.name
+        for p in entries
+        if pattern.fullmatch(p.name) is None
+    ]
+
     if unexpected:
         raise IngestionError(
-            f"Archivos inesperados en {source_dir} que no calzan filename_regex: {unexpected}"
+            f"Archivos inesperados en {source_dir} que no calzan "
+            f"filename_regex: {unexpected}"
         )
 
     infos: list[SourceFileInfo] = []
-    for p in entries:
-        m = pattern.match(p.name)
-        order_str, month, year_short = m.group(1), m.group(2), m.group(3)
-        order = int(order_str)
-        if month not in month_map:
-            raise IngestionError(f"Mes sin mapeo H/M/U/Z en {p.name}: {month}")
-        contract_code = month_map[month]
-        contract = f"{contract_code}{year_short}"
-        contract_full = f"{instrument}{contract_code}{year_short}"
-        infos.append(SourceFileInfo(
-            order=order, filename=p.name, path=p,
-            instrument=instrument, contract=contract, contract_full=contract_full,
-            month_code=contract_code, year_short=year_short,
-        ))
 
-    if len(infos) != expected_count:
-        raise IngestionError(
-            f"Se esperaban {expected_count} archivos fuente, se encontraron {len(infos)}"
+    # Procesa cada archivo válido.
+    for p in entries:
+        match = pattern.fullmatch(p.name)
+
+        # Extrae número de orden, mes y año desde el nombre.
+        order_str, month, year_short = (
+            match.group(1),
+            match.group(2),
+            match.group(3),
         )
 
-    infos.sort(key=lambda i: i.order)
-    orders = [i.order for i in infos]
-    expected_orders = list(range(expected_count))
+        order = int(order_str)
+
+        # Comprueba que el mes tenga un código contractual definido.
+        if month not in month_map:
+            raise IngestionError(
+                f"Mes sin mapeo H/M/U/Z en {p.name}: {month}"
+            )
+
+        contract_code = month_map[month]
+
+        # Ejemplo: H26.
+        contract = f"{contract_code}{year_short}"
+
+        # Ejemplo: MNQH26.
+        contract_full = f"{instrument}{contract_code}{year_short}"
+
+        infos.append(
+            SourceFileInfo(
+                order=order,
+                filename=p.name,
+                path=p,
+                instrument=instrument,
+                contract=contract,
+                contract_full=contract_full,
+                month_code=contract_code,
+                year_short=year_short,
+            )
+        )
+
+    # Ordena los archivos según el número inicial de su nombre.
+    infos.sort(key=lambda info: info.order)
+
+    # Obtiene la numeración realmente encontrada.
+    orders = [info.order for info in infos]
+
+    # La cantidad esperada ahora se deriva automáticamente.
+    # Ejemplo: 29 archivos -> se esperan órdenes 00 hasta 28.
+    expected_orders = list(range(len(infos)))
+
+    # Verifica que no falte ningún número intermedio.
     if orders != expected_orders:
         raise IngestionError(
-            f"Secuencia de <orden> no consecutiva desde 00: encontrada {orders}, esperada {expected_orders}"
+            "Secuencia de <orden> no consecutiva desde 00: "
+            f"encontrada {orders}, esperada {expected_orders}"
         )
 
     return infos
@@ -344,33 +406,85 @@ def _provisional_utc_hypothesis(gap_type: str, duration_seconds: float) -> str:
     return "PROVISIONAL: sin patrón estructural reconocido en S00."
 
 
-def compute_gaps(df: pd.DataFrame) -> pd.DataFrame:
-    """Recorre el DataFrame global ordenado y registra todo salto != 60s
-    entre filas consecutivas. No decide causa; ver §14 del plan."""
-    idx = df.index
-    source_files = df["source_file"].to_numpy()
-    contracts = df["contract"].to_numpy()
+def compute_gaps(
+    df: pd.DataFrame,
+    infos: list[SourceFileInfo],
+) -> pd.DataFrame:
+    """
+    Calcula los gaps dentro de cada archivo/contrato.
 
-    records = []
-    for i in range(1, len(df)):
-        prev_ts, next_ts = idx[i - 1], idx[i]
+    Los solapamientos entre contratos diferentes no se consideran gaps,
+    porque durante un rollover ambos contratos pueden contener barras
+    para los mismos timestamps.
+    """
+
+    records: list[dict[str, Any]] = []
+    ordered_infos = sorted(infos, key=lambda info: info.order)
+
+    # ---------------------------------------------------------
+    # 1. Gaps internos de cada archivo
+    # ---------------------------------------------------------
+    for info in ordered_infos:
+        file_df = df[df["source_file"] == info.filename].sort_index()
+        idx = file_df.index
+
+        for i in range(1, len(file_df)):
+            prev_ts = idx[i - 1]
+            next_ts = idx[i]
+            delta = (next_ts - prev_ts).total_seconds()
+
+            # Secuencia normal de barras de un minuto.
+            if delta == 60.0:
+                continue
+
+            # Dentro del mismo archivo no se permiten timestamps repetidos
+            # ni retrocesos temporales.
+            if delta <= 0:
+                raise IngestionError(
+                    f"Orden temporal inválido dentro de {info.filename}: "
+                    f"{prev_ts} -> {next_ts}"
+                )
+
+            records.append({
+                "gap_type_structural": "intra_file",
+                "source_file_left": info.filename,
+                "source_file_right": info.filename,
+                "contract_left": info.contract,
+                "contract_right": info.contract,
+                "previous_timestamp": prev_ts,
+                "next_timestamp": next_ts,
+                "duration_seconds": delta,
+                "structural_bucket": _structural_bucket(delta),
+            })
+
+    # ---------------------------------------------------------
+    # 2. Separación entre archivos consecutivos
+    # ---------------------------------------------------------
+    for left_info, right_info in zip(
+        ordered_infos[:-1],
+        ordered_infos[1:],
+    ):
+        left_df = df[df["source_file"] == left_info.filename]
+        right_df = df[df["source_file"] == right_info.filename]
+
+        prev_ts = left_df.index.max()
+        next_ts = right_df.index.min()
         delta = (next_ts - prev_ts).total_seconds()
+
+        # delta <= 0 significa que los contratos se solapan.
+        # No es un gap y no se elimina ninguna barra.
+        if delta <= 0:
+            continue
+
         if delta == 60.0:
             continue
-        if delta <= 0:
-            raise IngestionError(
-                f"Orden temporal inválido detectado entre filas: {prev_ts} -> {next_ts}"
-            )
-
-        same_file = source_files[i - 1] == source_files[i]
-        gap_type = "intra_file" if same_file else "inter_contract"
 
         records.append({
-            "gap_type_structural": gap_type,
-            "source_file_left": source_files[i - 1],
-            "source_file_right": source_files[i],
-            "contract_left": contracts[i - 1],
-            "contract_right": contracts[i],
+            "gap_type_structural": "inter_contract",
+            "source_file_left": left_info.filename,
+            "source_file_right": right_info.filename,
+            "contract_left": left_info.contract,
+            "contract_right": right_info.contract,
             "previous_timestamp": prev_ts,
             "next_timestamp": next_ts,
             "duration_seconds": delta,
@@ -378,22 +492,31 @@ def compute_gaps(df: pd.DataFrame) -> pd.DataFrame:
         })
 
     gaps_df = pd.DataFrame.from_records(records)
-    if gaps_df.empty:
-        gaps_df = pd.DataFrame(columns=[
-            "gap_type_structural", "source_file_left", "source_file_right",
-            "contract_left", "contract_right", "previous_timestamp", "next_timestamp",
-            "duration_seconds", "structural_bucket", "recurrence",
-            "provisional_interpretation_utc_hypothesis", "evidence_level",
-        ])
-        return gaps_df
 
-    # recurrence: cuántos gaps comparten bucket estructural -- evidencia
-    # puramente numérica, no interpretación causal.
+    if gaps_df.empty:
+        return pd.DataFrame(columns=[
+            "gap_type_structural",
+            "source_file_left",
+            "source_file_right",
+            "contract_left",
+            "contract_right",
+            "previous_timestamp",
+            "next_timestamp",
+            "duration_seconds",
+            "structural_bucket",
+            "recurrence",
+            "provisional_interpretation_utc_hypothesis",
+            "evidence_level",
+        ])
+
     bucket_counts = gaps_df["structural_bucket"].value_counts()
     gaps_df["recurrence"] = gaps_df["structural_bucket"].map(bucket_counts)
 
     gaps_df["provisional_interpretation_utc_hypothesis"] = gaps_df.apply(
-        lambda r: _provisional_utc_hypothesis(r["gap_type_structural"], r["duration_seconds"]),
+        lambda row: _provisional_utc_hypothesis(
+            row["gap_type_structural"],
+            row["duration_seconds"],
+        ),
         axis=1,
     )
 
@@ -401,16 +524,29 @@ def compute_gaps(df: pd.DataFrame) -> pd.DataFrame:
         bucket = row["structural_bucket"]
         recurrence = row["recurrence"]
         hours = row["duration_seconds"] / 3600.0
+
         if bucket == BUCKET_GT_100H:
             return GAP_EVIDENCE_UNCONFIRMED
-        if bucket == BUCKET_70MIN_100H and 40 <= hours <= 80 and recurrence >= 5:
+
+        if (
+            bucket == BUCKET_70MIN_100H
+            and 40 <= hours <= 80
+            and recurrence >= 5
+        ):
             return GAP_EVIDENCE_PROVISIONAL_PATTERN
+
         if bucket == BUCKET_70MIN_100H:
             return GAP_EVIDENCE_UNCONFIRMED
+
         return GAP_EVIDENCE_STRUCTURAL_ONLY
 
-    gaps_df["evidence_level"] = gaps_df.apply(evidence_level, axis=1)
+    gaps_df["evidence_level"] = gaps_df.apply(
+        evidence_level,
+        axis=1,
+    )
+
     return gaps_df
+
 
 
 EXTRAORDINARY_BUCKETS = {BUCKET_70MIN_100H, BUCKET_GT_100H}
@@ -664,7 +800,7 @@ def run_s00_ingestion(
     source_records = build_source_manifest_records(infos, per_file_df)
 
     df_full = concatenate_and_validate(parsed_dfs)
-    gaps_df = compute_gaps(df_full)
+    gaps_df = compute_gaps(df_full, infos)
     extraordinary_df = extraordinary_gaps(gaps_df, config)
 
     # El dataset persistido conserva exactamente el schema histórico que

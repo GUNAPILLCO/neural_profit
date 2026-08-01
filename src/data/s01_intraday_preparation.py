@@ -52,6 +52,7 @@ DAY_STATUS_NO_DATA_GAP_S00 = "no_data_gap_documented_s00"
 DAY_STATUS_NO_DATA_UNDETERMINED = "no_data_undetermined"
 
 ELIGIBILITY_FULL = "full_day_eligible"
+ELIGIBILITY_EARLY_CLOSE = "early_close_eligible"
 ELIGIBILITY_PARTIAL_REGIME = "partial_regime_eligible"
 ELIGIBILITY_DESCRIPTIVE = "descriptive_only"
 ELIGIBILITY_NOT_ELIGIBLE = "not_model_eligible"
@@ -251,6 +252,310 @@ def assign_regime(minute_of_day: np.ndarray, lookup: np.ndarray, labels: dict[in
 
 
 # ---------------------------------------------------------------------------
+# 2-bis) Resolucion de rollover: una serie principal, un contrato por fecha
+# ---------------------------------------------------------------------------
+#
+# Reglas (ver encargo de resolucion de rollover):
+# 1. Se detectan fechas con dos contratos dentro de la ventana 04:30-16:00.
+# 2. El volumen se compara unicamente sobre los minutos compartidos por
+#    ambos contratos esa fecha.
+# 3. El contrato entrante confirma el cruce cuando alcanza >= min_incoming_share
+#    del volumen compartido.
+# 4. Solo una sesion compartida COMPLETA (los 691 minutos de la ventana,
+#    para ambos contratos) puede confirmar el cruce -- una sesion parcial
+#    nunca confirma, aunque el share ya supere el umbral.
+# 5. El nuevo contrato se aplica desde la siguiente jornada OBSERVADA (la
+#    fecha de la senal misma sigue usando el contrato saliente).
+# 6. El cambio es irreversible: una vez confirmado, el contrato activo
+#    nunca retrocede a uno de rango anterior, aunque reaparezca solo o con
+#    mayor volumen residual.
+# 7. Una sola sesion confirmante alcanza; no se exige confirmacion doble.
+# 8. Nunca se mezclan contratos dentro de una misma fecha (se elige
+#    exactamente uno; el resto se descarta a un artefacto de auditoria).
+# 9. No se promedia OHLCV ni se crean barras sinteticas: se seleccionan
+#    filas reales de un unico contrato.
+# 10. Toda fila descartada por esta resolucion queda trazada.
+# 11. Regla de respaldo (fallback): si el contrato activo tiene EXACTAMENTE
+#    0 barras una fecha, pero el contrato entrante si tiene barras esa
+#    fecha, se selecciona la cobertura real del entrante para ESA fecha
+#    puntual unicamente (motivo `active_contract_no_data_fallback_to_incoming`).
+#    No mezcla contratos (el activo no aporta nada ese dia), no crea
+#    barras sinteticas, y NO adelanta formalmente el contrato activo para
+#    fechas siguientes -- el cruce formal sigue dependiendo exclusivamente
+#    de la regla 3/4 (sesion compartida completa + umbral de volumen). La
+#    jornada se clasifica despues con la logica estandar de
+#    build_trading_day_audit segun la cobertura real del entrante (691
+#    barras -> full_coverage; cobertura parcial -> clasificacion parcial
+#    estandar).
+#
+# Las fechas de transicion NO se hardcodean: se derivan de los datos. Las
+# fechas del encargo (Z24->H25, H25->M25, M26->U26, 2025-03-15, 2026-06-11,
+# 2025-03-17 como caso de regresion de la regla 11) se usan solo como
+# pruebas de regresion sobre el resultado de este algoritmo.
+
+ROLLOVER_REASON_SINGLE_CONTRACT = "single_contract_no_ambiguity"
+ROLLOVER_REASON_CONFIRMED_SIGNAL = "confirmed_rollover_signal"
+ROLLOVER_REASON_NOT_FULL_SESSION = "ambiguous_not_full_691_session"
+ROLLOVER_REASON_BELOW_THRESHOLD = "ambiguous_full_session_below_threshold"
+ROLLOVER_REASON_SUPERSEDED_RESIDUAL = "superseded_contract_residual_data"
+ROLLOVER_REASON_NO_DATA_FALLBACK = "active_contract_no_data_fallback_to_incoming"
+
+
+def _full_window_minute_set(window_cfg: dict[str, Any]) -> frozenset[int]:
+    return frozenset(range(window_cfg["start_minute"], window_cfg["end_minute"] + 1))
+
+
+def resolve_rollovers(
+    df_window: pd.DataFrame,
+    window_cfg: dict[str, Any],
+    min_incoming_share: float = 0.55,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Construye una serie principal con un unico contrato por fecha.
+
+    No selecciona contrato en S00 y no promedia OHLCV: para cada fecha con
+    mas de un contrato presente, elige las filas reales de exactamente un
+    contrato y traza el resto como descartado.
+
+    Devuelve (resolved_df, events_df, ambiguous_df, discarded_df):
+    - resolved_df: mismo esquema que df_window, un contrato por `date`.
+    - events_df: una fila por transicion CONFIRMADA (senal, saliente,
+      entrante, jornada efectiva, evidencia de volumen).
+    - ambiguous_df: una fila por cada fecha con mas de un contrato
+      presente, confirme o no, con el detalle completo de la evaluacion.
+      Distingue explicitamente tres conceptos que NO son intercambiables:
+        * formal_active_contract: el contrato activo segun el estado
+          irreversible del algoritmo (regla 6) al momento de evaluar esta
+          fecha -- puede seguir siendo el saliente incluso si esta fecha
+          usa datos del entrante (ver selection_reason).
+        * selected_contract_for_date: el contrato cuyas barras reales
+          quedan en resolved_df para ESTA fecha puntual (puede diferir de
+          formal_active_contract, p.ej. bajo la regla de respaldo 11).
+        * selection_reason: por que se eligio ese contrato para esta
+          fecha (confirmed_rollover_signal, active_contract_no_data_fallback_to_incoming,
+          superseded_contract_residual_data, etc. -- ver constantes
+          ROLLOVER_REASON_*).
+    - discarded_df: todas las filas removidas por esta resolucion, con
+      `discard_reason` (mismo vocabulario que selection_reason).
+    """
+    full_minutes = _full_window_minute_set(window_cfg)
+
+    if df_window.empty:
+        empty = df_window.copy()
+        return (
+            empty,
+            pd.DataFrame(columns=[
+                "signal_date", "outgoing_contract", "incoming_contract",
+                "effective_date", "shared_minutes", "outgoing_shared_volume",
+                "incoming_shared_volume", "incoming_share",
+            ]),
+            pd.DataFrame(columns=[
+                "date", "formal_active_contract", "candidate_contract",
+                "outgoing_observed_minutes", "incoming_observed_minutes",
+                "shared_minutes", "both_full_691_session",
+                "outgoing_shared_volume", "incoming_shared_volume",
+                "incoming_share", "is_confirming_session", "confirmed_here",
+                "selected_contract_for_date", "selection_reason",
+            ]),
+            empty.assign(discard_reason=pd.Series(dtype=str)),
+        )
+
+    # Orden cronologico real de los contratos, derivado de los datos (nunca
+    # hardcodeado): la primera vez que cada contrato aparece en el indice.
+    first_seen = df_window.groupby("contract").apply(lambda g: g.index.min(), include_groups=False)
+    contract_order = list(first_seen.sort_values().index)
+    contract_rank = {c: i for i, c in enumerate(contract_order)}
+
+    # Ultima fecha con datos de cada contrato en TODA la serie cruda (antes
+    # de resolver). Distingue un handoff limpio y permanente (el saliente ya
+    # no vuelve a tener barras nunca mas -> avance sin ambiguedad real) de un
+    # simple hueco de un dia dentro de una ventana de solapamiento activa
+    # (el saliente reaparece mas adelante -> sigue pendiente de confirmacion).
+    last_seen_date = df_window.groupby("contract")["date"].max().to_dict()
+
+    by_date = {d: g for d, g in df_window.groupby("date")}
+    dates_sorted = sorted(by_date.keys())
+
+    active_contract = contract_order[0]
+    events: list[dict[str, Any]] = []
+    ambiguous_rows: list[dict[str, Any]] = []
+    discarded_frames: list[pd.DataFrame] = []
+    resolved_frames: list[pd.DataFrame] = []
+
+    for d in dates_sorted:
+        day_df = by_date[d]
+        present = sorted(day_df["contract"].unique().tolist(), key=lambda c: contract_rank[c])
+
+        if len(present) == 1:
+            only = present[0]
+            if only == active_contract:
+                resolved_frames.append(day_df)
+            elif contract_rank[only] < contract_rank[active_contract]:
+                # Datos residuales de un contrato YA SUPERADO (regla 6,
+                # irreversibilidad): el activo no tiene barras esta fecha,
+                # asi que la serie resuelta queda sin datos ese dia y el
+                # residual se traza como descartado, nunca se revierte.
+                discarded_today = day_df.copy()
+                discarded_today["discard_reason"] = ROLLOVER_REASON_SUPERSEDED_RESIDUAL
+                discarded_frames.append(discarded_today)
+            elif d > last_seen_date[active_contract]:
+                # Handoff limpio y permanente: el contrato activo ya no
+                # vuelve a tener NINGUNA barra en el resto de la serie (no
+                # hubo, o ya termino, una ventana de solapamiento real que
+                # confirmar). No hay eleccion ambigua que hacer -- el activo
+                # avanza directamente al unico contrato disponible.
+                resolved_frames.append(day_df)
+                active_contract = only
+            else:
+                # Regla de respaldo (regla 11): el activo tiene EXACTAMENTE
+                # 0 barras esta fecha (hueco dentro de una ventana de
+                # solapamiento todavia sin confirmar), pero el entrante SI
+                # tiene barras. Se selecciona la cobertura real del
+                # entrante para esta fecha puntual -- no se mezcla con el
+                # activo (que no aporta nada ese dia), no se crean barras
+                # sinteticas, y el contrato activo NO avanza: el cruce
+                # formal para las fechas siguientes sigue dependiendo
+                # exclusivamente de la confirmacion por volumen (reglas 3-4).
+                resolved_frames.append(day_df)
+                ambiguous_rows.append({
+                    "date": d,
+                    "formal_active_contract": active_contract,
+                    "candidate_contract": only,
+                    "outgoing_observed_minutes": 0,
+                    "incoming_observed_minutes": len(set(day_df["minute_of_day"].tolist())),
+                    "shared_minutes": 0,
+                    "both_full_691_session": False,
+                    "outgoing_shared_volume": 0.0,
+                    "incoming_shared_volume": 0.0,
+                    "incoming_share": None,
+                    "is_confirming_session": False,
+                    "confirmed_here": False,
+                    "selected_contract_for_date": only,
+                    "selection_reason": ROLLOVER_REASON_NO_DATA_FALLBACK,
+                })
+                # active_contract se mantiene sin cambios (regla 11): esto
+                # no es una confirmacion de rollover, solo resuelve la
+                # fecha puntual sin datos del activo.
+            continue
+
+        if len(present) > 2:
+            raise IngestionError(
+                f"{d}: {len(present)} contratos presentes simultaneamente "
+                f"({present}) -- la resolucion de rollover solo contempla "
+                "pares consecutivos; requiere revision manual."
+            )
+
+        # len(present) == 2: fecha ambigua.
+        if active_contract not in present:
+            raise IngestionError(
+                f"{d}: ninguno de los contratos presentes ({present}) es el "
+                f"contrato activo ({active_contract}) -- secuencia inesperada, "
+                "requiere revision manual."
+            )
+
+        candidate = next(c for c in present if c != active_contract)
+        out_g = day_df[day_df["contract"] == active_contract]
+        in_g = day_df[day_df["contract"] == candidate]
+        out_minutes = set(out_g["minute_of_day"].tolist())
+        in_minutes = set(in_g["minute_of_day"].tolist())
+        shared_minutes = out_minutes & in_minutes
+        both_full = (out_minutes == full_minutes) and (in_minutes == full_minutes)
+
+        out_vol = float(out_g.loc[out_g["minute_of_day"].isin(shared_minutes), "volume"].sum())
+        in_vol = float(in_g.loc[in_g["minute_of_day"].isin(shared_minutes), "volume"].sum())
+        total_shared_vol = out_vol + in_vol
+        in_share = (in_vol / total_shared_vol) if total_shared_vol > 0 else None
+
+        # Regla 6 (irreversibilidad): un contrato de rango anterior al
+        # activo nunca puede ser evaluado como candidato de cruce, aunque
+        # tenga datos residuales ese dia -- solo se descarta.
+        candidate_is_forward = contract_rank[candidate] > contract_rank[active_contract]
+
+        is_confirming_session = candidate_is_forward and both_full  # regla 4
+        confirmed_here = bool(
+            is_confirming_session
+            and in_share is not None
+            and in_share >= min_incoming_share
+        )
+
+        if not candidate_is_forward:
+            reason = ROLLOVER_REASON_SUPERSEDED_RESIDUAL
+        elif confirmed_here:
+            reason = ROLLOVER_REASON_CONFIRMED_SIGNAL
+        elif not is_confirming_session:
+            reason = ROLLOVER_REASON_NOT_FULL_SESSION
+        else:
+            reason = ROLLOVER_REASON_BELOW_THRESHOLD
+
+        # Regla 5: la jornada de la SENAL misma sigue usando el contrato
+        # saliente. El contrato nuevo solo se activa desde la siguiente
+        # jornada observada (se aplica mas abajo, para la iteracion siguiente).
+        chosen = active_contract
+
+        ambiguous_rows.append({
+            "date": d,
+            "formal_active_contract": active_contract,
+            "candidate_contract": candidate,
+            "outgoing_observed_minutes": len(out_minutes),
+            "incoming_observed_minutes": len(in_minutes),
+            "shared_minutes": len(shared_minutes),
+            "both_full_691_session": both_full,
+            "outgoing_shared_volume": out_vol,
+            "incoming_shared_volume": in_vol,
+            "incoming_share": in_share,
+            "is_confirming_session": is_confirming_session,
+            "confirmed_here": confirmed_here,
+            "selected_contract_for_date": chosen,
+            "selection_reason": reason,
+        })
+
+        chosen_df = day_df[day_df["contract"] == chosen]
+        discarded_today = day_df[day_df["contract"] != chosen].copy()
+        discarded_today["discard_reason"] = reason
+        discarded_frames.append(discarded_today)
+        resolved_frames.append(chosen_df)
+
+        if confirmed_here:
+            future_dates = [x for x in dates_sorted if x > d]
+            effective_date = future_dates[0] if future_dates else None
+            events.append({
+                "signal_date": d,
+                "outgoing_contract": active_contract,
+                "incoming_contract": candidate,
+                "effective_date": effective_date,
+                "shared_minutes": len(shared_minutes),
+                "outgoing_shared_volume": out_vol,
+                "incoming_shared_volume": in_vol,
+                "incoming_share": in_share,
+            })
+            active_contract = candidate  # regla 6: irreversible desde aqui
+
+    resolved_df = pd.concat(resolved_frames).sort_index() if resolved_frames else df_window.iloc[0:0].copy()
+    events_df = pd.DataFrame.from_records(events)
+    ambiguous_df = pd.DataFrame.from_records(ambiguous_rows)
+    if discarded_frames:
+        discarded_df = pd.concat(discarded_frames).sort_index()
+    else:
+        discarded_df = df_window.iloc[0:0].copy()
+        discarded_df["discard_reason"] = pd.Series(dtype=str)
+
+    # Validacion bloqueante de conservacion (regla 9/10: no se promedia ni
+    # se inventan filas, y toda fila removida queda trazada). Si esto
+    # falla, alguna fila del insumo se perdio o se duplico silenciosamente
+    # entre resolved_df y discarded_df -- debe detener el pipeline, nunca
+    # continuar con un dataset inconsistente.
+    n_in = len(df_window)
+    n_out = len(resolved_df) + len(discarded_df)
+    if n_out != n_in:
+        raise IngestionError(
+            "Violacion de conservacion en resolve_rollovers: "
+            f"len(df_window)={n_in} != len(resolved_df)+len(discarded_df)={n_out} "
+            f"(resolved={len(resolved_df)}, discarded={len(discarded_df)})."
+        )
+
+    return resolved_df, events_df, ambiguous_df, discarded_df
+
+
+# ---------------------------------------------------------------------------
 # 3) Segmentos consecutivos (a nivel de barra, dentro de cada dia)
 # ---------------------------------------------------------------------------
 
@@ -273,6 +578,30 @@ def assign_consecutive_segments(df_window: pd.DataFrame) -> np.ndarray:
             current_seg += 1
         seg_id[cur_idx] = current_seg
     return seg_id
+
+
+def build_segment_summary(df_window: pd.DataFrame) -> pd.DataFrame:
+    """Un resumen por segmento consecutivo: fecha, contrato, minuto de
+    inicio/fin y longitud. Persistido para que S02+ nunca tenga que
+    recalcular limites de segmento ni cruzarlos por accidente."""
+    if df_window.empty:
+        return pd.DataFrame(columns=[
+            "date", "segment_id", "contract", "start_minute", "end_minute", "length",
+        ])
+
+    rows = []
+    for (d, seg_id), sub in df_window.groupby(["date", "consecutive_segment_id"]):
+        minutes = sub["minute_of_day"].to_numpy()
+        contracts = sub["contract"].unique()
+        rows.append({
+            "date": d,
+            "segment_id": int(seg_id),
+            "contract": contracts[0] if len(contracts) == 1 else "MIXED",
+            "start_minute": int(minutes.min()),
+            "end_minute": int(minutes.max()),
+            "length": int(len(sub)),
+        })
+    return pd.DataFrame.from_records(rows).sort_values(["date", "segment_id"]).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -313,11 +642,16 @@ def build_trading_day_audit(
     window_cfg: dict[str, Any],
     known_gaps: list[dict[str, Any]],
     date_range: pd.DatetimeIndex,
+    early_close_cfg: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     expected_bars = window_cfg["expected_minutes"]
     start_d, end_d = date_range.min().date(), date_range.max().date()
     trading_days = get_cme_trading_days(start_d, end_d)
     early_close_days = get_cme_early_close_dates(start_d, end_d)
+
+    early_close_cfg = early_close_cfg or {"end_minute": 780, "expected_minutes": 511}
+    early_close_minutes = frozenset(range(window_cfg["start_minute"], early_close_cfg["end_minute"] + 1))
+    early_close_expected_bars = early_close_cfg["expected_minutes"]
 
     by_date = {d: g for d, g in df_window.groupby("date")}
 
@@ -336,6 +670,8 @@ def build_trading_day_audit(
             max_gap_minutes = 0
             missing_minutes = list(range(window_cfg["start_minute"], window_cfg["end_minute"] + 1))
             regime_stats = {r["regime_id"]: {"observed": 0, "consecutive": False} for r in regimes_cfg}
+            n_contracts_observed = 0
+            is_verified_early_close = False
         else:
             sub = sub.sort_values("minute_of_day")
             observed_bars = len(sub)
@@ -345,6 +681,14 @@ def build_trading_day_audit(
             all_minutes = set(range(window_cfg["start_minute"], window_cfg["end_minute"] + 1))
             missing_minutes = sorted(all_minutes - set(present_minutes.tolist()))
 
+            n_contracts_observed = int(sub["contract"].nunique())
+            if n_contracts_observed > 1:
+                raise IngestionError(
+                    f"{d}: mas de un contrato presente tras la resolucion de "
+                    f"rollover ({sorted(sub['contract'].unique().tolist())}) -- "
+                    "invariante violada (regla 8, no mezclar contratos por fecha)."
+                )
+
             seg_sizes = sub.groupby("consecutive_segment_id").size()
             consecutive_segment_count = int(len(seg_sizes))
             longest_run = int(seg_sizes.max())
@@ -353,6 +697,12 @@ def build_trading_day_audit(
             gaps = diffs[diffs > 1]
             internal_gap_count = int(len(gaps))
             max_gap_minutes = int(gaps.max() - 1) if len(gaps) else 0
+
+            is_verified_early_close = (
+                observed_bars == early_close_expected_bars
+                and set(present_minutes.tolist()) == early_close_minutes
+                and internal_gap_count == 0
+            )
 
             regime_stats = {}
             for r in regimes_cfg:
@@ -366,7 +716,11 @@ def build_trading_day_audit(
                     r_consecutive = bool(np.all(np.diff(r_present) == 1)) if r_observed > 1 else True
                 regime_stats[rid] = {"observed": r_observed, "expected": r_expected, "consecutive": r_consecutive}
 
-        is_fully_consecutive = (observed_bars == expected_bars) and internal_gap_count == 0
+        is_fully_consecutive = (
+            observed_bars == expected_bars
+            and internal_gap_count == 0
+            and n_contracts_observed <= 1
+        )
         missing_bars = expected_bars - observed_bars
         coverage_ratio = observed_bars / expected_bars if expected_bars else 0.0
 
@@ -394,10 +748,14 @@ def build_trading_day_audit(
                 inclusion_reason = "CME_Equity marks this as a trading day but zero bars observed; cause not determined by S01"
         elif is_fully_consecutive:
             day_status = DAY_STATUS_FULL
-            inclusion_reason = f"{expected_bars}/{expected_bars} bars, fully consecutive"
-        elif d in early_close_days:
+            inclusion_reason = f"{expected_bars}/{expected_bars} bars, fully consecutive, single contract"
+        elif d in early_close_days and is_verified_early_close:
             day_status = DAY_STATUS_PARTIAL_EARLY_CLOSE
-            inclusion_reason = f"CME_Equity early close scheduled at {early_close_days[d]} ET"
+            inclusion_reason = (
+                f"CME_Equity early close scheduled at {early_close_days[d]} ET; "
+                f"verified {early_close_expected_bars} consecutive bars "
+                f"{window_cfg['start_time']}-{early_close_cfg.get('end_time', '13:00:00')}"
+            )
         else:
             day_status = DAY_STATUS_PARTIAL_UNDETERMINED
             inclusion_reason = f"{observed_bars}/{expected_bars} bars observed; no known reason for the shortfall"
@@ -413,7 +771,11 @@ def build_trading_day_audit(
         elif is_fully_consecutive:
             eligibility_category = ELIGIBILITY_FULL
             is_model_eligible = True
-            eligibility_reason = "full window coverage, fully consecutive"
+            eligibility_reason = "full window coverage, fully consecutive, single contract"
+        elif day_status == DAY_STATUS_PARTIAL_EARLY_CLOSE:
+            eligibility_category = ELIGIBILITY_EARLY_CLOSE
+            is_model_eligible = True
+            eligibility_reason = "verified CME early close session, not included in the default full-window population"
         elif any(rs.get("consecutive") for rs in regime_stats.values()):
             eligible_regimes = [rid for rid, rs in regime_stats.items() if rs.get("consecutive")]
             eligibility_category = ELIGIBILITY_PARTIAL_REGIME
@@ -433,6 +795,7 @@ def build_trading_day_audit(
             "coverage_ratio": coverage_ratio,
             "first_observed_time": first_time,
             "last_observed_time": last_time,
+            "n_contracts_observed": n_contracts_observed,
             "is_fully_consecutive": is_fully_consecutive,
             "consecutive_segment_count": consecutive_segment_count,
             "longest_consecutive_run": longest_run,
@@ -519,12 +882,44 @@ def build_manifest(
     audit_df: pd.DataFrame,
     regime_dist: pd.DataFrame,
     dst_check: dict[str, Any],
+    rollover_events: pd.DataFrame,
+    rollover_ambiguous: pd.DataFrame,
+    rollover_discarded: pd.DataFrame,
+    n_rows_pre_rollover: int,
     repo_root: Path,
 ) -> dict[str, Any]:
     provenance = get_git_provenance(repo_root)
 
     day_status_counts = audit_df["day_status"].value_counts().to_dict()
     eligibility_counts = audit_df["eligibility_category"].value_counts().to_dict()
+
+    n_rows_resolved = int(len(df_window))
+    n_rows_discarded = int(len(rollover_discarded))
+    conservation_check_passed = bool(n_rows_pre_rollover == n_rows_resolved + n_rows_discarded)
+    if not conservation_check_passed:
+        raise IngestionError(
+            "Violacion de conservacion detectada al construir el manifest: "
+            f"n_rows_pre_rollover={n_rows_pre_rollover} != "
+            f"n_rows_resolved({n_rows_resolved}) + n_rows_discarded({n_rows_discarded})."
+        )
+
+    rollover_summary = {
+        "n_ambiguous_dates": int(len(rollover_ambiguous)),
+        "n_confirmed_transitions": int(len(rollover_events)),
+        "n_rows_pre_rollover": n_rows_pre_rollover,
+        "n_rows_resolved": n_rows_resolved,
+        "n_discarded_rows": n_rows_discarded,
+        "conservation_check": (
+            f"{n_rows_pre_rollover} == {n_rows_resolved} + {n_rows_discarded}"
+        ),
+        "conservation_check_passed": conservation_check_passed,
+        "events": json.loads(
+            rollover_events.assign(
+                signal_date=lambda d: d["signal_date"].astype(str),
+                effective_date=lambda d: d["effective_date"].astype(str),
+            ).to_json(orient="records")
+        ) if not rollover_events.empty else [],
+    }
 
     manifest = {
         "pipeline_version": config["pipeline_version"],
@@ -562,6 +957,7 @@ def build_manifest(
             "by_eligibility_category": eligibility_counts,
         },
         "regime_distribution": regime_dist.to_dict(orient="records"),
+        "rollover": rollover_summary,
     }
     return manifest
 
@@ -598,6 +994,7 @@ def build_summary(manifest: dict[str, Any]) -> dict[str, Any]:
         "day_classification": manifest["day_classification"],
         "regime_distribution": manifest["regime_distribution"],
         "dst_check": manifest["dst_check"],
+        "rollover": manifest["rollover"],
         "note": (
             "La ventana 04:30-16:00 y sus limites no son quiebres estructurales "
             "optimos (ver reports/stage_reports/S01_v2_report.md); se conservan "
@@ -620,6 +1017,10 @@ class S01Result:
     tz_table: pd.DataFrame
     manifest: dict[str, Any]
     summary: dict[str, Any]
+    rollover_events: pd.DataFrame
+    rollover_ambiguous: pd.DataFrame
+    rollover_discarded: pd.DataFrame
+    segment_summary: pd.DataFrame
     parquet_path: Path
     parquet_sha256: str
     audit_path: Path
@@ -627,6 +1028,10 @@ class S01Result:
     manifest_path: Path
     summary_path: Path
     tz_validation_path: Path
+    rollover_events_path: Path
+    rollover_ambiguous_path: Path
+    rollover_discarded_path: Path
+    segment_summary_path: Path
 
 
 def run_s01_preparation(
@@ -652,6 +1057,10 @@ def run_s01_preparation(
     audit_path = artifacts_dir / config["artifacts"]["trading_day_audit_name"]
     regime_dist_path = artifacts_dir / config["artifacts"]["regime_distribution_name"]
     tz_validation_path = artifacts_dir / config["artifacts"]["tz_validation_name"]
+    rollover_events_path = artifacts_dir / config["artifacts"]["rollover_events_name"]
+    rollover_ambiguous_path = artifacts_dir / config["artifacts"]["rollover_ambiguous_dates_name"]
+    rollover_discarded_path = artifacts_dir / config["artifacts"]["rollover_discarded_rows_name"]
+    segment_summary_path = artifacts_dir / config["artifacts"]["consecutive_segments_name"]
 
     df_raw = pd.read_parquet(raw_parquet_path)
 
@@ -664,7 +1073,17 @@ def run_s01_preparation(
     df_ny = df_raw.copy()
     df_ny.index = idx_ny
 
-    df_window = filter_window(df_ny, config["window"])
+    df_window_raw = filter_window(df_ny, config["window"])
+
+    # Resolucion de rollover: construye una serie principal con un unico
+    # contrato por fecha ANTES de asignar regimenes, segmentos o auditar
+    # jornadas -- todo lo que sigue ya opera sobre una serie sin ambiguedad
+    # de contrato (ver reglas 1-10 en resolve_rollovers).
+    rollover_cfg = config.get("rollover", {})
+    df_window, rollover_events, rollover_ambiguous, rollover_discarded = resolve_rollovers(
+        df_window_raw, config["window"],
+        min_incoming_share=rollover_cfg.get("min_incoming_share", 0.55),
+    )
 
     lookup, labels = build_regime_lookup(config["regimes"], config["window"])
     regime_id, regime_label = assign_regime(df_window["minute_of_day"].to_numpy(), lookup, labels)
@@ -672,10 +1091,12 @@ def run_s01_preparation(
     df_window["regime_label"] = regime_label
 
     df_window["consecutive_segment_id"] = assign_consecutive_segments(df_window)
+    segment_summary = build_segment_summary(df_window)
 
     date_range = pd.date_range(df_ny.index.min().date(), df_ny.index.max().date(), freq="D")
     audit_df = build_trading_day_audit(
-        df_window, config["regimes"], config["window"], config["known_gaps"], date_range
+        df_window, config["regimes"], config["window"], config["known_gaps"], date_range,
+        early_close_cfg=config.get("early_close"),
     )
     regime_dist = build_regime_distribution(df_window)
 
@@ -686,6 +1107,8 @@ def run_s01_preparation(
         config=config, raw_manifest=raw_manifest, raw_parquet_path=raw_parquet_path,
         tz_table=tz_table, tz_selection=tz_selection, df_window=df_window,
         audit_df=audit_df, regime_dist=regime_dist, dst_check=dst_check,
+        rollover_events=rollover_events, rollover_ambiguous=rollover_ambiguous,
+        rollover_discarded=rollover_discarded, n_rows_pre_rollover=int(len(df_window_raw)),
         repo_root=project_root,
     )
 
@@ -706,19 +1129,41 @@ def run_s01_preparation(
         reused_audit = pd.read_parquet(audit_path) if audit_path.exists() else audit_df
         reused_regime_dist = pd.read_parquet(regime_dist_path) if regime_dist_path.exists() else regime_dist
         reused_summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else build_summary(existing_manifest)
+        reused_events = pd.read_parquet(rollover_events_path) if rollover_events_path.exists() else rollover_events
+        reused_ambiguous = pd.read_parquet(rollover_ambiguous_path) if rollover_ambiguous_path.exists() else rollover_ambiguous
+        reused_discarded = pd.read_parquet(rollover_discarded_path) if rollover_discarded_path.exists() else rollover_discarded
+        reused_segments = pd.read_parquet(segment_summary_path) if segment_summary_path.exists() else segment_summary
         return S01Result(
             reused_existing=True, df_window=reused_df, audit_df=reused_audit,
             regime_dist=reused_regime_dist, tz_table=tz_table,
             manifest=existing_manifest, summary=reused_summary,
+            rollover_events=reused_events, rollover_ambiguous=reused_ambiguous,
+            rollover_discarded=reused_discarded, segment_summary=reused_segments,
             parquet_path=parquet_path, parquet_sha256=sha256_file(parquet_path),
             audit_path=audit_path, regime_dist_path=regime_dist_path,
             manifest_path=manifest_path, summary_path=summary_path,
             tz_validation_path=tz_validation_path,
+            rollover_events_path=rollover_events_path, rollover_ambiguous_path=rollover_ambiguous_path,
+            rollover_discarded_path=rollover_discarded_path, segment_summary_path=segment_summary_path,
         )
 
     write_result = atomic_write_parquet(final_df, parquet_path)
     atomic_write_parquet(audit_df.reset_index(drop=True), audit_path)
     atomic_write_parquet(regime_dist.reset_index(drop=True), regime_dist_path)
+    atomic_write_parquet(segment_summary.reset_index(drop=True), segment_summary_path)
+
+    if not rollover_events.empty:
+        atomic_write_parquet(rollover_events.reset_index(drop=True), rollover_events_path)
+    else:
+        rollover_events.to_parquet(rollover_events_path, index=False)
+    if not rollover_ambiguous.empty:
+        atomic_write_parquet(rollover_ambiguous.reset_index(drop=True), rollover_ambiguous_path)
+    else:
+        rollover_ambiguous.to_parquet(rollover_ambiguous_path, index=False)
+    if not rollover_discarded.empty:
+        atomic_write_parquet(rollover_discarded.reset_index(drop=True), rollover_discarded_path)
+    else:
+        rollover_discarded.to_parquet(rollover_discarded_path, index=False)
 
     summary = build_summary(manifest)
     write_json_atomic(manifest, manifest_path)
@@ -729,8 +1174,12 @@ def run_s01_preparation(
         reused_existing=False, df_window=final_df, audit_df=audit_df,
         regime_dist=regime_dist, tz_table=tz_table,
         manifest=manifest, summary=summary,
+        rollover_events=rollover_events, rollover_ambiguous=rollover_ambiguous,
+        rollover_discarded=rollover_discarded, segment_summary=segment_summary,
         parquet_path=parquet_path, parquet_sha256=write_result["sha256"],
         audit_path=audit_path, regime_dist_path=regime_dist_path,
         manifest_path=manifest_path, summary_path=summary_path,
         tz_validation_path=tz_validation_path,
+        rollover_events_path=rollover_events_path, rollover_ambiguous_path=rollover_ambiguous_path,
+        rollover_discarded_path=rollover_discarded_path, segment_summary_path=segment_summary_path,
     )

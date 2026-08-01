@@ -301,3 +301,283 @@ explícitamente en config/manifest/summary.
 
 Ver salida siguiente en la entrega de este turno (comandos ejecutados justo
 antes de este reporte, nada fue commiteado).
+
+---
+
+## 16. Addendum — Resolución de rollover y cierre anticipado verificado (2026-07-31)
+
+Esta revisión agrega a S01 v2 dos piezas que faltaban respecto al cierre
+original de este reporte (§1-§15, que sigue vigente en lo demás):
+
+### 16.1. Resolución de rollover (nuevo)
+
+El cierre original de S01 v2 no seleccionaba contrato: el dataset podía
+tener más de una barra por minuto en fechas de rollover con solapamiento.
+
+**Conteo verificado de transiciones** (artefacto:
+`reports/stage_reports/s01_rollover_transition_audit.csv`, una fila por
+par de contratos consecutivos, generado programáticamente a partir de
+`data/01_raw/mnq_raw_v2.parquet` — no a mano):
+
+```text
+27 contratos en el historial completo (H20 .. U26)  ->  26 transiciones posibles
+  23 transiciones son handoffs limpios: CERO fechas con ambos contratos
+     presentes (verificado por interseccion de fechas por contrato)
+   3 transiciones tienen solapamiento real, confirmado por volumen:
+     Z24->H25, H25->M25, M26->U26
+```
+
+Una corrección importante respecto a un borrador previo de este informe:
+la cifra correcta de transiciones es **26** (27 contratos − 1), no 25; y
+los handoffs limpios son **23**, no 22. El número "25" que aparecía antes
+mezclaba, por error, el total de *transiciones* con el total de *filas* en
+`rollover_ambiguous_dates_v2.parquet` (que sí es 25, ver abajo) — son dos
+conteos distintos que coinciden por casualidad en ser cercanos.
+
+`rollover_ambiguous_dates_v2.parquet` registra **25 filas** (fechas
+evaluadas por el algoritmo), no confundir con las 26 transiciones:
+
+```text
+23 filas: fecha con los DOS contratos presentes simultaneamente ese dia
+           (7 en Z24/H25, 7 en H25/M25, 9 en M26/U26)
+ 2 filas: fecha donde el contrato activo tiene 0 barras pero cae DENTRO de
+           una ventana de solapamiento aun no confirmada (2025-03-16 y
+           2025-03-17, dentro de la ventana H25->M25) -- no son un
+           solapamiento de 2 contratos ese dia especifico, pero tampoco
+           son un handoff limpio: se evaluan con la misma logica
+           conservadora (no confirman, no se rellenan).
+```
+
+`resolve_rollovers` (`src/data/s01_intraday_preparation.py`) construye la
+serie principal con exactamente un contrato por fecha, sin promediar
+OHLCV ni crear barras sintéticas, aplicando: detección de fechas
+ambiguas, comparación de volumen solo sobre minutos compartidos,
+confirmación exclusivamente con sesión compartida completa (691/691) y
+≥55% de volumen del entrante, activación desde la jornada siguiente
+observada (nunca la fecha de la señal), irreversibilidad, y trazabilidad
+completa de las filas descartadas.
+
+**Regresión verificada contra los datos reales** (`tests/test_s01_integration.py`):
+
+```text
+Z24 -> H25: senal 2024-12-17 (share 69.10%), H25 activo desde 2024-12-18
+H25 -> M25: senal 2025-03-18 (share 69.09%), M25 activo desde 2025-03-19
+M26 -> U26: senal 2026-06-15 (share 76.44%), U26 activo desde 2026-06-16
+2025-03-15: NO confirma (sesion no completa: H25 2/691, M25 1/691)
+2026-06-11: conserva M26 con su cobertura real (646/691); U26 (636/691,
+  share 1.3%) no confirma
+```
+
+**Validación de conservación (bloqueante, en código productivo, no solo en
+pruebas):** `resolve_rollovers` calcula `len(resolved_df) + len(discarded_df)`
+y lo compara contra `len(df_window)` (la entrada, antes de resolver);
+`build_manifest` repite el mismo chequeo y hace fallar la construcción del
+manifest si no coincide. Resultado persistido en
+`mnq_intraday_v2_manifest.json → rollover.conservation_check`:
+
+```text
+1.166.364 (filas antes de resolver rollover) = 1.151.817 (resueltas) + 14.547 (descartadas)
+conservation_check_passed: true
+```
+
+Nuevos artefactos: `rollover_events_v2.parquet` (3 transiciones
+confirmadas), `rollover_ambiguous_dates_v2.parquet` (25 filas evaluadas),
+`rollover_discarded_rows_v2.parquet` (14.547 filas descartadas con
+motivo, nunca borradas silenciosamente), `consecutive_segments_v2.parquet`
+(resumen de segmento por fecha: inicio, fin, longitud),
+`s01_rollover_transition_audit.csv` (26 transiciones, ver arriba) y
+`s01_rollover_overlap_dates_full_table.csv` (tabla completa por fecha:
+contratos, filas por contrato, volumen compartido, contrato
+seleccionado/descartado, `day_status` antes/después y motivo — ver §16.4).
+
+### 16.2. Clasificación de jornadas revisada
+
+- `full_coverage` ahora exige también contrato único
+  (`n_contracts_observed <= 1`), verificado con una invariante que hace
+  fallar `build_trading_day_audit` si alguna fecha llega con más de un
+  contrato — no puede volver a ocurrir silenciosamente.
+- `partial_early_close_cme` exige la intersección de DOS condiciones
+  independientes, no una sola: (a) la fecha está declarada como cierre
+  anticipado en el calendario oficial versionado `pandas_market_calendars`
+  (paquete externo mantenido, no inventado por este pipeline — ver §16.5
+  para la verificación completa de las 40 fechas contra ese calendario) y
+  (b) los datos observados calzan EXACTO con 511 barras consecutivas
+  04:30-13:00 (`config/intraday_config.yaml: early_close`). Las 40 fechas
+  que cumplen ambas condiciones quedan en una categoría de elegibilidad
+  nueva, separada de `full_day_eligible`: `early_close_eligible` (no entra
+  por defecto en la población principal).
+
+### 16.3. Efecto de la actualización de datos de S00
+
+`data/00_source` se actualizó (ver addendum §12 de `S00_v2_report.md`): 27
+archivos en vez de 26, cobertura hasta 2026-07-31, y desaparición de los
+gaps S00-05 (H25→M25) y S00-06 (M23 interno). Efecto combinado (fuente
+actualizada + rollover resuelto + cierre anticipado verificado) sobre la
+clasificación de las 2.414 fechas calendario del rango:
+
+```text
+day_status:
+  full_coverage             1.570  (antes 1.482)
+  no_data_weekend             509
+  partial_undetermined        275
+  partial_early_close_cme      40  (categoria antes inferida, ahora verificada)
+  no_data_cme_holiday          11
+  no_data_undetermined          9
+  no_data_gap_documented_s00    0  (antes 25; el gap ya no existe en los datos)
+  partial_gap_documented_s00    0  (antes 4; el gap ya no existe en los datos)
+
+eligibility_category:
+  full_day_eligible          1.570
+  partial_regime_eligible        87
+  early_close_eligible           40  (categoria nueva)
+  descriptive_only              188
+  not_model_eligible            529
+```
+
+Estas cifras ya incluyen el efecto de la regla de respaldo 11 (§16.7,
+agregada en una revisión posterior de este cierre): `full_coverage` sube
+de 1.569 a 1.570 porque `2025-03-17` deja de perderse y pasa a contarse
+como completa.
+
+### 16.4. Tres estados de S01 (para no confundir shapes de distinto origen)
+
+Auditoría de cierre solicitada explícitamente para separar qué cambió por
+la actualización de fuente y qué cambió por la resolución de rollover:
+
+| Estado | Filas | `full_coverage` | Cómo se obtuvo |
+|---|---:|---:|---|
+| **Artefacto histórico** (fuente pre-actualización, sin resolución de rollover) | 1.087.777 | 1.482 | Documentado en `01_CURRENT_DECISIONS.md §32` antes de esta revisión; fuente original ya no existe (fue reemplazada), no reproducible directamente. |
+| **Datos actuales, INMEDIATAMENTE ANTES de resolver rollover** | 1.166.364 | 1.549 | Recalculado en esta auditoría: filtro de ventana sobre `mnq_raw_v2.parquet` actual, SIN `resolve_rollovers` y SIN el requisito de contrato único (clasificación al estilo anterior al fix, aplicada a los datos ya actualizados). |
+| **Resultado final** (fuente actualizada + rollover resuelto, incluida la regla de respaldo 11 + contrato único + cierre anticipado verificado) | 1.152.510 | 1.570 | `data/02_intraday/mnq_intraday_v2.parquet` / `trading_day_audit_v2.parquet` vigentes. |
+
+La fila intermedia aísla el efecto de la actualización de fuente por sí
+sola (1.087.777→1.166.364 filas, 1.482→1.549 `full_coverage`, SIN
+rollover); la fila final aísla además el efecto de resolver el rollover
+(1.166.364→1.152.510 filas: se descartan 13.854 filas correspondientes a
+un contrato no elegido — ver conservación exacta más abajo). El cambio
+1.549→1.570 `full_coverage` (neto +21) ocurre **enteramente dentro de las
+25 fechas ambiguas** de §16.1/§16.6 (verificado en
+`s01_rollover_overlap_dates_full_table.csv`): 22 de esas 25 pasan a ser
+`full_coverage` (21 porque ya no tienen un segundo contrato mezclado
+bloqueando la clasificación, más `2025-03-17` gracias a la regla de
+respaldo 11 — §16.7), y 1 (`2025-03-16`, con solo 2 barras reales de M25)
+sigue sin ser `full_coverage` bajo cualquier lógica (22 − 1 = 21). Las
+2.389 fechas restantes del rango no cambian de clasificación entre el
+estado intermedio y el final, porque `resolve_rollovers` no las toca.
+
+**Conservación exacta** (bloqueante en `resolve_rollovers` y en
+`build_manifest`, no solo en pruebas):
+`1.166.364 = 1.152.510 (resueltas) + 13.854 (descartadas)`.
+
+### 16.5. Verificación de las 40 fechas `partial_early_close_cme` contra calendario oficial
+
+**Fuente:** `pandas_market_calendars==5.4.0`, calendario `CME_Equity`
+(clase `CMEEquityExchangeCalendar`, módulo `pandas_market_calendars.calendars.cme`)
+— paquete externo versionado que modela el calendario de feriados y
+cierres anticipados publicado por CME Group; no es una tabla escrita a
+mano por este pipeline.
+
+**Verificación ejecutada** (no solo el patrón de 511 barras): se llamó a
+`get_cme_early_close_dates()` sobre el rango completo 2020-01-01 a
+2026-12-31 (66 fechas de cierre anticipado declaradas por el calendario
+en ese rango) y se comprobó que las 40 fechas clasificadas
+`partial_early_close_cme` están **todas** presentes en ese calendario, con
+hora de cierre declarada `13:00` en las 40. Lista completa (fecha, día de
+semana, hora declarada por CME_Equity) persistida en
+`reports/stage_reports/s01_early_close_dates_verified.csv` — 40 filas,
+desde 2020-02-17 hasta 2026-07-03.
+
+Las 40 fechas corresponden a los feriados de cierre anticipado
+estándar de CME (MLK Day, Presidents Day, Memorial Day, Juneteenth, 3-5
+de julio según caiga el 4, Labor Day, Thanksgiving), consistente con el
+calendario público de CME Group. **Conclusión: las 40 fechas quedan
+confirmadas** (no pendientes) porque están respaldadas por dos evidencias
+independientes — calendario oficial versionado + patrón exacto de datos
+— no solo por el patrón de 511 barras.
+
+Nota de alcance: `pandas_market_calendars` es un paquete de terceros
+mantenido activamente que modela el calendario publicado por CME, no una
+consulta en vivo a una API oficial de CME Group; se documenta así para
+que quien audite esta decisión sepa exactamente qué se verificó.
+
+### 16.6. Tabla completa de fechas con solapamiento (`s01_rollover_overlap_dates_full_table.csv`)
+
+25 filas (ver §16.1), con fecha, contratos, filas por contrato, volumen
+compartido, contrato seleccionado/descartado, `day_status` antes
+(recalculado con la lógica anterior al fix, sobre los datos actuales) y
+`day_status` después (resultado final), motivo. **3 de las 25 fechas NO
+quedan `full_coverage`** tras la resolución (`2025-03-17` sí queda
+`full_coverage`, gracias a la regla de respaldo 11 — ver §16.7):
+
+| Fecha | Contrato elegido | `day_status` final | `eligibility_category` | Motivo |
+|---|---|---|---|---|
+| 2025-03-15 | H25 | `partial_undetermined` | `descriptive_only` | Sesión compartida no completa (H25 solo 2 barras, M25 solo 1 esa fecha) — no puede confirmar ni clasificar como completa. |
+| 2025-03-16 | M25 (regla de respaldo 11) | `partial_undetermined` | `descriptive_only` | H25 (activo) 0 barras; M25 (entrante) solo 2 barras — se conserva su cobertura real (no se rellena), pero 2/691 no alcanza para `full_coverage`. |
+| 2026-06-11 | M26 | `partial_undetermined` | `partial_regime_eligible` | M26 (activo) tiene solo 646/691 barras ese día (no es una sesión completa); U26 tiene 636/691 con share de solo 1,3% — ninguna confirma. La fecha se clasifica por la cobertura REAL de M26. |
+
+Pruebas: **28 unitarias + 40 de integración** de S01 pasan (68/68) contra
+el dataset y la lógica actualizados — incluye pruebas de rollover
+(regresión de las 3 transiciones confirmadas, casos límite, la regla de
+respaldo 11 con el caso de regresión `2025-03-17`, irreversibilidad del
+estado activo, conservación reportada en el manifest), cierre anticipado
+verificado y unicidad de contrato; se removieron dos pruebas que
+dependían de los gaps S00-05/S00-06 ya inexistentes, y se corrigió una
+prueba de irreversibilidad para no confundir las fechas de respaldo con
+una reversión real del contrato activo. Comando:
+`pytest tests/test_s01_intraday_preparation.py tests/test_s01_integration.py -q`.
+
+### 16.7. Regla de respaldo 11 — activo sin datos, entrante con datos válidos
+
+**Regla añadida en una revisión posterior de este cierre.** Si el
+contrato activo tiene EXACTAMENTE 0 barras una fecha, pero el contrato
+entrante sí tiene datos esa fecha, se selecciona la cobertura real del
+entrante para **esa fecha puntual únicamente** (motivo
+`active_contract_no_data_fallback_to_incoming`). Condiciones aplicadas
+(`resolve_rollovers` en `src/data/s01_intraday_preparation.py`):
+
+```text
+1. El contrato activo debe tener EXACTAMENTE 0 barras esa fecha.
+2. El contrato entrante debe tener barras esa fecha (cualquier cantidad;
+   la clasificacion final -- full_coverage o parcial -- la decide
+   build_trading_day_audit con la logica estandar, no esta regla).
+3. No se mezclan contratos: el activo no aporta nada ese dia.
+4. No se crean ni completan barras sinteticas: se usa la cobertura real
+   del entrante, completa o parcial.
+5. Motivo registrado: active_contract_no_data_fallback_to_incoming.
+6. NO adelanta formalmente el contrato activo para fechas siguientes: el
+   cruce formal sigue dependiendo EXCLUSIVAMENTE de la confirmacion por
+   volumen (reglas 3-4 del algoritmo de rollover).
+7. Si el entrante tiene 691 barras consecutivas -> full_coverage normal.
+8. Si tiene cobertura parcial -> clasificacion parcial estandar (sin
+   relleno).
+```
+
+**Caso de regresión obligatorio, verificado:**
+
+```text
+2025-03-17: H25 (activo) 0 barras, M25 (entrante) 691 barras validas.
+  -> S01 conserva M25 para esa fecha.
+  -> day_status = full_coverage, eligibility_category = full_day_eligible.
+  -> El rollover formal H25 -> M25 SIGUE confirmando el 2025-03-18,
+     efectivo desde el 2025-03-19 (sin adelantarse).
+```
+
+`2025-03-16` (mismo mecanismo, pero M25 solo tiene 2 barras esa fecha)
+también aplica la regla: se conservan las 2 barras reales de M25
+(`day_status = partial_undetermined`, ya no `no_data_weekend` como antes,
+porque ahora hay datos reales observados ese día).
+
+**Efecto sobre las cifras del dataset** (respecto al estado sin esta
+regla, documentado en §16.1-§16.6 antes de esta adición):
+
+```text
+full_coverage:        1.569 -> 1.570  (+1, 2025-03-17)
+n_rows_resolved:       1.151.817 -> 1.152.510  (+693 = 2 + 691)
+n_discarded_rows:      14.547 -> 13.854  (-693)
+conservation_check:    1.166.364 == 1.152.510 + 13.854  (sigue pasando)
+fechas NO full_coverage entre las 25 ambiguas: 4 -> 3
+```
+
+Ningún otro efecto: las 3 transiciones confirmadas (Z24→H25, H25→M25,
+M26→U26) y sus fechas de señal/efectividad no cambiaron, porque la regla
+11 nunca modifica el estado del contrato activo formal.

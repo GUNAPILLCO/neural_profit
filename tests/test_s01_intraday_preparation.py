@@ -192,6 +192,78 @@ def test_trading_day_audit_partial_regime_eligible():
     assert row["regime_1_is_consecutive"]
 
 
+def test_trading_day_audit_verified_early_close_511_bars():
+    window_cfg = make_window_cfg()
+    early_close_days = prep.get_cme_early_close_dates(date(2020, 1, 1), date(2026, 12, 31))
+    assert early_close_days, "se necesita al menos una fecha real de cierre anticipado CME para esta prueba"
+    d = sorted(early_close_days.keys())[0]
+
+    minutes = list(range(270, 781))  # 04:30-13:00, 511 minutos
+    idx = pd.DatetimeIndex(
+        [pd.Timestamp(d, tz="America/New_York") + pd.Timedelta(minutes=m) for m in minutes]
+    )
+    df = pd.DataFrame({
+        "date": [d] * len(minutes), "minute_of_day": minutes,
+        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1, "contract": "H20",
+    }, index=idx)
+    df["consecutive_segment_id"] = prep.assign_consecutive_segments(df)
+    df["regime_id"] = 0
+    df["regime_label"] = "x"
+
+    date_range = pd.date_range(d, d, freq="D")
+    audit = prep.build_trading_day_audit(df, make_regimes_cfg(), window_cfg, [], date_range)
+    row = audit.iloc[0]
+    assert row["observed_bars"] == 511
+    assert row["day_status"] == prep.DAY_STATUS_PARTIAL_EARLY_CLOSE
+    assert row["eligibility_category"] == prep.ELIGIBILITY_EARLY_CLOSE
+    assert row["is_model_eligible"]
+    assert row["eligibility_category"] != prep.ELIGIBILITY_FULL
+
+
+def test_trading_day_audit_early_close_calendar_but_bars_dont_match_falls_to_undetermined():
+    # El calendario CME marca cierre anticipado, pero los datos observados
+    # no calzan el patron verificado (511 barras 04:30-13:00 exactas) --
+    # no debe asumirse el cierre anticipado sin verificacion empirica.
+    window_cfg = make_window_cfg()
+    early_close_days = prep.get_cme_early_close_dates(date(2020, 1, 1), date(2026, 12, 31))
+    d = sorted(early_close_days.keys())[0]
+
+    minutes = list(range(270, 700))  # patron que NO calza 04:30-13:00 exacto
+    idx = pd.DatetimeIndex(
+        [pd.Timestamp(d, tz="America/New_York") + pd.Timedelta(minutes=m) for m in minutes]
+    )
+    df = pd.DataFrame({
+        "date": [d] * len(minutes), "minute_of_day": minutes,
+        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1, "contract": "H20",
+    }, index=idx)
+    df["consecutive_segment_id"] = prep.assign_consecutive_segments(df)
+    df["regime_id"] = 0
+    df["regime_label"] = "x"
+
+    date_range = pd.date_range(d, d, freq="D")
+    audit = prep.build_trading_day_audit(df, make_regimes_cfg(), window_cfg, [], date_range)
+    row = audit.iloc[0]
+    assert row["day_status"] != prep.DAY_STATUS_PARTIAL_EARLY_CLOSE
+    assert row["eligibility_category"] != prep.ELIGIBILITY_EARLY_CLOSE
+
+
+def test_trading_day_audit_raises_if_more_than_one_contract_same_date():
+    # Invariante defensiva: para cuando build_trading_day_audit recibe una
+    # entrada que NO paso por resolve_rollovers (p.ej. uso incorrecto desde
+    # otra etapa) -- nunca debe clasificar silenciosamente una fecha con mas
+    # de un contrato.
+    window_cfg = make_window_cfg()
+    d = date(2024, 1, 2)
+    df = _full_day_df(d, window_cfg)
+    other = df.copy()
+    other["contract"] = "M20"
+    mixed = pd.concat([df, other])
+    mixed["consecutive_segment_id"] = prep.assign_consecutive_segments(mixed)
+    date_range = pd.date_range(d, d, freq="D")
+    with pytest.raises(prep.IngestionError, match="mas de un contrato"):
+        prep.build_trading_day_audit(mixed, make_regimes_cfg(), window_cfg, [], date_range)
+
+
 def test_trading_day_audit_descriptive_only_when_no_regime_fully_covered():
     window_cfg = make_window_cfg()
     d = date(2024, 1, 2)
@@ -207,6 +279,218 @@ def test_trading_day_audit_descriptive_only_when_no_regime_fully_covered():
     row = audit.iloc[0]
     assert row["eligibility_category"] == prep.ELIGIBILITY_DESCRIPTIVE
     assert not row["is_model_eligible"]
+
+
+# ---------------------------------------------------------------------------
+# Resolucion de rollover (datos sinteticos)
+# ---------------------------------------------------------------------------
+
+def _synthetic_full_day(d, contract, volume_per_bar=1, window_cfg=None):
+    window_cfg = window_cfg or make_window_cfg()
+    minutes = list(range(window_cfg["start_minute"], window_cfg["end_minute"] + 1))
+    idx = pd.DatetimeIndex(
+        [pd.Timestamp(d, tz="America/New_York") + pd.Timedelta(minutes=m) for m in minutes]
+    )
+    return pd.DataFrame({
+        "date": [d] * len(minutes),
+        "minute_of_day": minutes,
+        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+        "volume": volume_per_bar, "contract": contract,
+    }, index=idx)
+
+
+def _synthetic_partial_day(d, contract, minutes, volume_per_bar=1):
+    idx = pd.DatetimeIndex(
+        [pd.Timestamp(d, tz="America/New_York") + pd.Timedelta(minutes=m) for m in minutes]
+    )
+    return pd.DataFrame({
+        "date": [d] * len(minutes),
+        "minute_of_day": minutes,
+        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+        "volume": volume_per_bar, "contract": contract,
+    }, index=idx)
+
+
+def test_resolve_rollovers_clean_handoff_no_overlap_advances_without_confirmation():
+    window_cfg = make_window_cfg()
+    df = pd.concat([
+        _synthetic_full_day(date(2024, 1, 2), "H24", window_cfg=window_cfg),
+        _synthetic_full_day(date(2024, 1, 3), "M24", window_cfg=window_cfg),
+    ])
+    resolved, events, ambiguous, discarded = prep.resolve_rollovers(df, window_cfg)
+    assert resolved.groupby("date")["contract"].nunique().max() == 1
+    assert resolved[resolved["date"] == date(2024, 1, 3)]["contract"].unique().tolist() == ["M24"]
+    assert events.empty  # sin ambiguedad real, no hay "senal" que registrar
+    assert discarded.empty
+
+
+def test_resolve_rollovers_confirms_on_full_session_above_threshold():
+    window_cfg = make_window_cfg()
+    d1, d2 = date(2024, 3, 18), date(2024, 3, 19)
+    df = pd.concat([
+        _synthetic_full_day(d1, "H24", volume_per_bar=1, window_cfg=window_cfg),   # 691 vol
+        _synthetic_full_day(d1, "M24", volume_per_bar=2, window_cfg=window_cfg),   # 1382 vol -> share 2/3=0.667
+        _synthetic_full_day(d2, "M24", volume_per_bar=1, window_cfg=window_cfg),
+    ])
+    resolved, events, ambiguous, discarded = prep.resolve_rollovers(df, window_cfg, min_incoming_share=0.55)
+
+    assert len(events) == 1
+    row = events.iloc[0]
+    assert row["signal_date"] == d1
+    assert row["outgoing_contract"] == "H24"
+    assert row["incoming_contract"] == "M24"
+    assert row["effective_date"] == d2
+    assert row["incoming_share"] == pytest.approx(2 / 3)
+
+    # La fecha de la senal SIGUE usando el saliente; el entrante recien
+    # aplica desde la jornada siguiente.
+    assert resolved[resolved["date"] == d1]["contract"].unique().tolist() == ["H24"]
+    assert resolved[resolved["date"] == d2]["contract"].unique().tolist() == ["M24"]
+    assert set(discarded["discard_reason"]) == {"confirmed_rollover_signal"}
+
+
+def test_resolve_rollovers_does_not_confirm_below_threshold():
+    window_cfg = make_window_cfg()
+    d1 = date(2024, 3, 18)
+    df = pd.concat([
+        _synthetic_full_day(d1, "H24", volume_per_bar=10, window_cfg=window_cfg),  # share = 1/11 ~ 0.09
+        _synthetic_full_day(d1, "M24", volume_per_bar=1, window_cfg=window_cfg),
+    ])
+    resolved, events, ambiguous, discarded = prep.resolve_rollovers(df, window_cfg, min_incoming_share=0.55)
+    assert events.empty
+    assert resolved[resolved["date"] == d1]["contract"].unique().tolist() == ["H24"]
+    row = ambiguous.iloc[0]
+    assert bool(row["confirmed_here"]) is False
+    assert bool(row["is_confirming_session"]) is True  # sesion completa, pero bajo el umbral
+
+
+def test_resolve_rollovers_partial_session_never_confirms_even_above_threshold():
+    window_cfg = make_window_cfg()
+    d1 = date(2024, 3, 18)
+    df = pd.concat([
+        _synthetic_full_day(d1, "H24", volume_per_bar=1, window_cfg=window_cfg),
+        _synthetic_partial_day(d1, "M24", minutes=list(range(270, 700)), volume_per_bar=100),
+    ])
+    resolved, events, ambiguous, discarded = prep.resolve_rollovers(df, window_cfg, min_incoming_share=0.55)
+    assert events.empty  # nunca confirma: sesion no fue completa (691/691)
+    row = ambiguous.iloc[0]
+    assert bool(row["both_full_691_session"]) is False
+    assert bool(row["confirmed_here"]) is False
+    assert resolved[resolved["date"] == d1]["contract"].unique().tolist() == ["H24"]
+
+
+def test_resolve_rollovers_no_data_fallback_uses_incoming_full_session():
+    # Regla 11 (respaldo): el saliente tiene EXACTAMENTE 0 barras un dia
+    # intermedio dentro de una ventana de solapamiento sin confirmar, pero
+    # el entrante SI tiene una sesion completa -- se selecciona el
+    # entrante para ESA fecha puntual (full_coverage cuando corresponda),
+    # sin adelantar formalmente el contrato activo.
+    window_cfg = make_window_cfg()
+    d0, d_gap, d1 = date(2024, 3, 17), date(2024, 3, 18), date(2024, 3, 19)
+    df = pd.concat([
+        _synthetic_full_day(d0, "H24", window_cfg=window_cfg),
+        _synthetic_full_day(d_gap, "M24", window_cfg=window_cfg),  # H24 ausente este dia
+        _synthetic_full_day(d1, "H24", window_cfg=window_cfg),      # H24 reaparece
+    ])
+    resolved, events, ambiguous, discarded = prep.resolve_rollovers(df, window_cfg)
+
+    assert events.empty  # el respaldo NO es una confirmacion formal de rollover
+    gap_rows = resolved[resolved["date"] == d_gap]
+    assert gap_rows["contract"].unique().tolist() == ["M24"]
+    assert len(gap_rows) == 691  # sesion completa real del entrante -> full_coverage aguas abajo
+    assert discarded[discarded["date"] == d_gap].empty  # nada se descarta: no habia nada del activo
+
+    fallback_row = ambiguous[ambiguous["date"] == d_gap].iloc[0]
+    assert fallback_row["selection_reason"] == "active_contract_no_data_fallback_to_incoming"
+    assert fallback_row["selected_contract_for_date"] == "M24"
+    assert bool(fallback_row["confirmed_here"]) is False
+
+    # H24 reaparece el dia siguiente y el activo NO fue adelantado por el
+    # respaldo -- sigue siendo H24 (sin confirmacion formal de volumen).
+    assert resolved[resolved["date"] == d1]["contract"].unique().tolist() == ["H24"]
+
+
+def test_resolve_rollovers_no_data_fallback_preserves_partial_coverage():
+    # Si el entrante solo tiene cobertura parcial ese dia, se conserva tal
+    # cual (sin rellenar ni completar barras sinteticas).
+    window_cfg = make_window_cfg()
+    d0, d_gap, d1 = date(2024, 3, 17), date(2024, 3, 18), date(2024, 3, 19)
+    df = pd.concat([
+        _synthetic_full_day(d0, "H24", window_cfg=window_cfg),
+        _synthetic_partial_day(d_gap, "M24", minutes=[270, 271, 272]),  # H24 ausente, M24 parcial
+        _synthetic_full_day(d1, "H24", window_cfg=window_cfg),
+    ])
+    resolved, events, ambiguous, discarded = prep.resolve_rollovers(df, window_cfg)
+    gap_rows = resolved[resolved["date"] == d_gap]
+    assert gap_rows["contract"].unique().tolist() == ["M24"]
+    assert len(gap_rows) == 3  # cobertura parcial real, no completada ni descartada
+    assert events.empty
+
+
+def test_resolve_rollovers_regression_2025_03_17_h25_m25():
+    # Caso de regresion obligatorio: H25 (activo) 0 barras el 2025-03-17,
+    # M25 (entrante) 691 barras validas -- S01 debe conservar M25 esa
+    # fecha, y el rollover formal H25->M25 sigue confirmando el 2025-03-18
+    # (efectivo desde el 2025-03-19), sin adelantarse por el respaldo.
+    window_cfg = make_window_cfg()
+    d15 = date(2025, 3, 15)
+    d16 = date(2025, 3, 16)
+    d17 = date(2025, 3, 17)
+    d18 = date(2025, 3, 18)
+    d19 = date(2025, 3, 19)
+    df = pd.concat([
+        _synthetic_full_day(date(2025, 3, 13), "H25", window_cfg=window_cfg),
+        _synthetic_full_day(date(2025, 3, 14), "H25", window_cfg=window_cfg),
+        _synthetic_partial_day(d15, "H25", minutes=[270, 271]),
+        _synthetic_partial_day(d16, "M25", minutes=[270, 271]),  # H25 ausente
+        _synthetic_full_day(d17, "M25", window_cfg=window_cfg),  # H25 ausente, M25 sesion completa
+        _synthetic_full_day(d18, "H25", volume_per_bar=1, window_cfg=window_cfg),
+        _synthetic_full_day(d18, "M25", volume_per_bar=2, window_cfg=window_cfg),  # confirma (share 0.667)
+        _synthetic_full_day(d19, "M25", window_cfg=window_cfg),
+    ])
+    resolved, events, ambiguous, discarded = prep.resolve_rollovers(df, window_cfg, min_incoming_share=0.55)
+
+    d17_rows = resolved[resolved["date"] == d17]
+    assert d17_rows["contract"].unique().tolist() == ["M25"]
+    assert len(d17_rows) == 691
+
+    assert len(events) == 1
+    row = events.iloc[0]
+    assert row["signal_date"] == d18
+    assert row["effective_date"] == d19
+    assert resolved[resolved["date"] == d18]["contract"].unique().tolist() == ["H25"]
+    assert resolved[resolved["date"] == d19]["contract"].unique().tolist() == ["M25"]
+
+
+def test_resolve_rollovers_irreversible_ignores_residual_outgoing_data():
+    window_cfg = make_window_cfg()
+    d1, d2, d3 = date(2024, 3, 18), date(2024, 3, 19), date(2024, 3, 20)
+    df = pd.concat([
+        _synthetic_full_day(d1, "H24", volume_per_bar=1, window_cfg=window_cfg),
+        _synthetic_full_day(d1, "M24", volume_per_bar=2, window_cfg=window_cfg),  # confirma (share 0.667)
+        _synthetic_partial_day(d2, "H24", minutes=[270, 271]),  # residual del saliente, ya no activo
+        _synthetic_full_day(d2, "M24", volume_per_bar=1, window_cfg=window_cfg),
+        _synthetic_full_day(d3, "M24", volume_per_bar=1, window_cfg=window_cfg),
+    ])
+    resolved, events, ambiguous, discarded = prep.resolve_rollovers(df, window_cfg, min_incoming_share=0.55)
+    assert len(events) == 1
+    # d2 y d3 deben quedar en M24 (irreversible); el residual H24 de d2 se descarta.
+    assert resolved[resolved["date"] == d2]["contract"].unique().tolist() == ["M24"]
+    assert resolved[resolved["date"] == d3]["contract"].unique().tolist() == ["M24"]
+    residual = discarded[(discarded["date"] == d2) & (discarded["contract"] == "H24")]
+    assert len(residual) == 2
+    assert (residual["discard_reason"] == "superseded_contract_residual_data").all()
+
+
+def test_resolve_rollovers_no_rows_lost_or_duplicated():
+    window_cfg = make_window_cfg()
+    d1 = date(2024, 3, 18)
+    df = pd.concat([
+        _synthetic_full_day(d1, "H24", volume_per_bar=1, window_cfg=window_cfg),
+        _synthetic_full_day(d1, "M24", volume_per_bar=2, window_cfg=window_cfg),
+    ])
+    resolved, events, ambiguous, discarded = prep.resolve_rollovers(df, window_cfg, min_incoming_share=0.55)
+    assert len(resolved) + len(discarded) == len(df)
 
 
 # ---------------------------------------------------------------------------

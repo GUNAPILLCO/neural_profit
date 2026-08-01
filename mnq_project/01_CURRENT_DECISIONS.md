@@ -979,6 +979,17 @@ Chequeo automatizado de solapamiento de intervalos entre archivos: MEJORA MENOR 
 Detalle completo: `reports/stage_reports/S00_v2_report.md` y
 `02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.1-bis`.
 
+**Addendum (2026-07-31):** `data/00_source/` fue actualizada por fuera de
+este pipeline (27 archivos en vez de 26; cobertura ampliada hasta
+2026-07-31). Como consecuencia, **los dos gaps `no_resuelto` listados
+arriba (S00-05 H25→M25 y S00-06 M23 interno) ya no existen en los datos
+actuales** — quedan resueltos por datos reales, no por decisión de
+alcance. Filas totales: 2.172.640 → 2.329.783. Ver
+`reports/stage_reports/S00_v2_report.md §12` y
+`02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.1-bis` (actualizado). El
+resto de las decisiones de esta sección (timezone, timestamp_semantics,
+nomenclatura de contrato) sigue vigente sin cambios.
+
 ---
 
 ## 32. Estado vigente de S01 (APROBADO — S01 v2)
@@ -1048,21 +1059,99 @@ resolverse o revisarse antes de tratar el dataset como completamente
 auditado:
 
 ```text
-244 jornadas partial_undetermined + 11 no_data_undetermined: causa sin determinar
+274 jornadas partial_undetermined + 10 no_data_undetermined: causa sin determinar
 Patrón recurrente 16:20-16:30 (2019-2021): fuera de la ventana primaria,
   documentado, no afecta mnq_intraday_v2.parquet
 Discrepancia CME_Equity vs "CME Globex Equity" (1 día, 2025-01-09): no revalidada
 Confirmación documental de zona horaria de origen (heredada de S00): sigue pendiente
-test_s00_integration.py::test_never_writes_to_productive_raw_dir: falla
-  preexistente de S00 (asume data/01_raw/ vacío), no relacionada con S01 v2
+test_s00_integration.py::test_never_writes_to_productive_raw_dir: RESUELTO
+  (2026-07-31) — la prueba asumía data/01_raw/ vacío; se corrigió para
+  verificar que solo existan los nombres de artefacto productivo esperados.
 ```
 
 Detalle completo: `reports/stage_reports/S01_v2_report.md` y
 `02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.2-bis`.
 
+**Addendum (2026-07-31) — resolución de rollover y cierre anticipado
+verificado:**
+
+```text
+resolve_rollovers() construye una serie principal con UN UNICO CONTRATO
+  POR FECHA, aplicada antes de asignar regimenes/segmentos/auditar
+  jornadas. De las 26 transiciones de contrato del historial completo
+  (27 contratos, H20 a U26), 23 son handoffs limpios sin solapamiento
+  real y 3 tienen solapamiento real, confirmado por sesion compartida
+  completa (691/691) y >=55% de volumen del entrante (ver artefacto de
+  verificacion reports/stage_reports/s01_rollover_transition_audit.csv).
+  rollover_ambiguous_dates_v2.parquet registra 25 fechas evaluadas: 23
+  con los dos contratos presentes ese dia, mas 2 fechas adicionales
+  (2025-03-16 y 2025-03-17) donde el contrato activo no tiene barras
+  pero la fecha cae dentro de una ventana de solapamiento aun no
+  confirmada.
+
+Transiciones confirmadas (3 de 26):
+    Z24->H25: senal 2024-12-17, activo desde 2024-12-18 (share 69.10%)
+    H25->M25: senal 2025-03-18, activo desde 2025-03-19 (share 69.09%)
+    M26->U26: senal 2026-06-15, activo desde 2026-06-16 (share 76.44%)
+  2025-03-15 no confirma (sesion no completa); 2026-06-11 conserva M26
+  con su cobertura real (646/691). Cambio irreversible, sin doble
+  confirmacion, sin mezclar contratos por fecha, sin promediar OHLCV.
+
+Validacion de conservacion (bloqueante, automatizada en
+  resolve_rollovers y en build_manifest -- no solo en pruebas):
+    filas_ANTES_de_resolver_rollover = filas_resueltas + filas_descartadas
+    1.166.364 = 1.151.817 + 14.547  ->  PASA
+  Las 14.547 filas descartadas quedan trazadas en
+  rollover_discarded_rows_v2.parquet (nunca borradas silenciosamente).
+
+full_coverage ahora exige tambien contrato unico por fecha (verificado
+  con invariante que hace fallar la auditoria si se viola).
+
+partial_early_close_cme deja de asumirse solo por 511 barras 04:30-13:00:
+  las 40 fechas se verificaron ADEMAS contra el calendario oficial
+  pandas_market_calendars==5.4.0, calendario CME_Equity
+  (CMEEquityExchangeCalendar), cuyo horario declarado de cierre
+  anticipado (13:00 ET) coincide en las 40/40 fechas -- ver
+  reports/stage_reports/s01_early_close_dates_verified.csv. Categoria de
+  elegibilidad nueva: early_close_eligible (40 fechas), separada de
+  full_day_eligible, no incluida por defecto en la poblacion principal.
+
+Tres estados de S01, para no confundir el shape historico con el
+  intermedio (datos actuales, sin resolver rollover) ni con el final:
+    artefacto historico (fuente pre-actualizacion, sin rollover):    1.087.777 filas, 1.482 full_coverage
+    datos actuales, INMEDIATAMENTE ANTES de resolver rollover:       1.166.364 filas, 1.549 full_coverage (verificado por script, sin invariante de contrato unico)
+    resultado final (fuente actualizada + rollover resuelto):        1.152.510 filas, 1.570 full_coverage
+
+Regla de respaldo 11 (agregada en revision posterior de este cierre):
+  si el contrato activo tiene EXACTAMENTE 0 barras una fecha pero el
+  entrante si tiene datos, se conserva la cobertura real del entrante
+  SOLO para esa fecha puntual (motivo
+  active_contract_no_data_fallback_to_incoming), sin mezclar contratos,
+  sin barras sinteticas, y SIN adelantar el contrato activo formal (el
+  cruce sigue dependiendo exclusivamente de la confirmacion por volumen).
+  Caso de regresion: 2025-03-17 (H25 activo con 0 barras, M25 entrante
+  con 691 barras validas) queda full_coverage/full_day_eligible; el
+  rollover formal H25->M25 sigue confirmando el 2025-03-18, efectivo
+  desde el 2025-03-19 (no se adelanta). Efecto neto: full_coverage
+  1.569->1.570; filas resueltas 1.151.817->1.152.510; descartadas
+  14.547->13.854; conservacion sigue pasando: 1.166.364 = 1.152.510 +
+  13.854.
+```
+
+`data/02_intraday/mnq_intraday_v2.parquet` (nombre de artefacto sin
+cambios) fue regenerado con esta logica; el shape historico
+1.482×691=1.024.062 citado arriba queda como antecedente de la ejecución
+anterior a esta actualización, no como invariante vigente. Detalle
+completo en `reports/stage_reports/S01_v2_report.md §16`.
+
+**Importante:** S02 depende de este shape y de la ausencia de
+`n_contracts_observed` > 1; sus artefactos productivos quedan
+desactualizados hasta que se reejecute explícitamente (fuera de alcance
+de esta revisión — no se modificó S02).
+
 ---
 
-## 33. Estado vigente de S02 (APROBADO — S02 v2, `APPROVED_WITH_KNOWN_LIMITATION`)
+## 33. Estado vigente de S02 (APROBADO — S02 v2, `APPROVED`)
 
 S02 fue reconstruido y aprobado formalmente, con una limitación técnica
 conocida declarada explícitamente (no bloqueante). Fija el artefacto de

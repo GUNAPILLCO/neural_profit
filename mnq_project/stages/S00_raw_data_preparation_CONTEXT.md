@@ -226,3 +226,22 @@ Chequeo automatizado de solapamiento de intervalos entre archivos —
 Detalle completo en `reports/stage_reports/S00_v2_report.md`,
 `01_CURRENT_DECISIONS.md §31` y
 `02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md §4.1-bis`.
+
+### Addendum (2026-07-31)
+
+`data/00_source/` se actualizó por fuera de este pipeline (27 archivos en
+vez de 26; se agregó `26_mnq_09_26.Last.txt` y se reemplazaron 4 archivos
+existentes con versiones más completas). Efecto directo:
+
+```text
+Filas: 2.172.640 -> 2.329.783
+Rango: ...2026-04-17 20:18 -> ...2026-07-31 20:10
+```
+
+Los dos gaps `no_resuelto` de esta tabla (gap previo a MNQM25 y el gap
+interno de MNQM23) **ya no existen en los datos actuales** — quedan
+`RESUELTO` por datos reales, no por decisión de alcance. Ver
+`reports/stage_reports/S00_v2_report.md §12` para el detalle completo,
+incluidas dos correcciones menores de código encontradas durante esta
+revisión (firma desactualizada de `compute_gaps` en dos pruebas, y dos
+bloques de código muerto eliminados).

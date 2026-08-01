@@ -1,0 +1,26 @@
+date,contracts,Z24_rows,H25_rows,shared_volume_out,shared_volume_in,contract_selected,contract_discarded,"day_status_before (old-style, sin contrato unico)",day_status_after,reason,M25_rows,M26_rows,U26_rows
+2024-12-12,Z24/H25,691.0,660.0,1012705.0,18126.0,Z24,H25,no full_coverage,full_coverage,ambiguous_not_full_691_session,,,
+2024-12-13,Z24/H25,691.0,691.0,1169365.0,46685.0,Z24,H25,no full_coverage,full_coverage,ambiguous_full_session_below_threshold,,,
+2024-12-16,Z24/H25,691.0,691.0,502828.0,481387.0,Z24,H25,no full_coverage,full_coverage,ambiguous_full_session_below_threshold,,,
+2024-12-17,Z24/H25,691.0,691.0,371687.0,831350.0,Z24,H25,no full_coverage,full_coverage,confirmed_rollover_signal,,,
+2024-12-18,H25/Z24,691.0,691.0,1115853.0,277991.0,H25,Z24,no full_coverage,full_coverage,superseded_contract_residual_data,,,
+2024-12-19,H25/Z24,691.0,691.0,1318811.0,161251.0,H25,Z24,no full_coverage,full_coverage,superseded_contract_residual_data,,,
+2024-12-20,H25/Z24,300.0,691.0,360172.0,10852.0,H25,Z24,no full_coverage,full_coverage,superseded_contract_residual_data,,,
+2025-03-13,H25/M25,,691.0,2283306.0,42284.0,H25,M25,no full_coverage,full_coverage,ambiguous_not_full_691_session,690.0,,
+2025-03-14,H25/M25,,691.0,1785846.0,43631.0,H25,M25,no full_coverage,full_coverage,ambiguous_not_full_691_session,689.0,,
+2025-03-15,H25/M25,,2.0,1.0,1.0,H25,M25,no full_coverage,partial_undetermined,ambiguous_not_full_691_session,1.0,,
+2025-03-16,H25/M25,,0.0,0.0,0.0,M25,H25,no full_coverage,partial_undetermined,active_contract_no_data_fallback_to_incoming,2.0,,
+2025-03-17,H25/M25,,0.0,0.0,0.0,M25,H25,full_coverage,full_coverage,active_contract_no_data_fallback_to_incoming,691.0,,
+2025-03-18,H25/M25,,691.0,556353.0,1243482.0,H25,M25,no full_coverage,full_coverage,confirmed_rollover_signal,691.0,,
+2025-03-19,M25/H25,,691.0,1404939.0,323242.0,M25,H25,no full_coverage,full_coverage,superseded_contract_residual_data,691.0,,
+2025-03-20,M25/H25,,691.0,1639409.0,223532.0,M25,H25,no full_coverage,full_coverage,superseded_contract_residual_data,691.0,,
+2025-03-21,M25/H25,,301.0,252502.0,12601.0,M25,H25,no full_coverage,full_coverage,superseded_contract_residual_data,691.0,,
+2026-06-08,M26/U26,,,2237282.0,15320.0,M26,U26,no full_coverage,full_coverage,ambiguous_not_full_691_session,,691.0,656.0
+2026-06-09,M26/U26,,,3575688.0,38253.0,M26,U26,no full_coverage,full_coverage,ambiguous_not_full_691_session,,691.0,649.0
+2026-06-10,M26/U26,,,2927595.0,29650.0,M26,U26,no full_coverage,full_coverage,ambiguous_not_full_691_session,,691.0,678.0
+2026-06-11,M26/U26,,,2458107.0,33238.0,M26,U26,no full_coverage,partial_undetermined,ambiguous_not_full_691_session,,646.0,636.0
+2026-06-12,M26/U26,,,1999857.0,417399.0,M26,U26,no full_coverage,full_coverage,ambiguous_full_session_below_threshold,,691.0,691.0
+2026-06-15,M26/U26,,,404958.0,1313912.0,M26,U26,no full_coverage,full_coverage,confirmed_rollover_signal,,691.0,691.0
+2026-06-16,U26/M26,,,2403671.0,315519.0,U26,M26,no full_coverage,full_coverage,superseded_contract_residual_data,,691.0,691.0
+2026-06-17,U26/M26,,,2669831.0,178869.0,U26,M26,no full_coverage,full_coverage,superseded_contract_residual_data,,691.0,691.0
+2026-06-18,U26/M26,,,284136.0,11238.0,U26,M26,no full_coverage,full_coverage,superseded_contract_residual_data,,301.0,691.0

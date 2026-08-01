@@ -275,3 +275,58 @@ confirmados en config/manifest/summary — no ocultos.
   posición de reclasificar con un calendario real.
 - No asumir `timestamp_semantics` (inicio/cierre de barra) sin decidirlo
   explícitamente, ya que afecta cómo se interpreta `minute_of_day`.
+
+---
+
+## 12. Addendum — Actualización de fuente y saneamiento de código (2026-07-31)
+
+`data/00_source/` fue actualizada por fuera de este pipeline: ahora contiene
+**27 archivos** (se agregó `26_mnq_09_26.Last.txt`, contrato U26) y varios
+archivos existentes (`13_mnq_06_23`, `20_mnq_03_25`, `21_mnq_06_25`,
+`25_mnq_06_26`) se reemplazaron con versiones más completas. Como
+consecuencia directa:
+
+```text
+Filas totales:        2.172.640 -> 2.329.783
+Archivos fuente:       26 -> 27
+Rango temporal:        ...2026-04-17 20:18 -> ...2026-07-31 20:10
+```
+
+**Los dos gaps extraordinarios documentados como `no_resuelto` (§4.1-bis de
+`02_KNOWN_ISSUES_AND_INVALIDATED_RESULTS.md`) ya NO existen en los datos
+actuales:**
+
+- **S00-05 (gap H25→M25, inter_contract, ~15d19h):** los archivos
+  actualizados de H25 y M25 ahora se solapan (H25: 2024-12-12→2025-03-22;
+  M25: 2025-03-13→2025-06-22) en vez de tener un vacío entre ambos. Este
+  solapamiento es precisamente lo que S01 v2 usa para resolver el rollover
+  Z24→H25 y H25→M25 (ver §6 de `S01_v2_report.md`).
+- **S00-06 (gap interno M23, intra_file, ~260h):** el archivo M23
+  actualizado ya no tiene ningún salto mayor a ~57h dentro de su rango.
+
+`data/01_raw/mnq_raw_v2_gaps.parquet` ya no contiene ningún gap en el
+bucket `>100h`; los `70min-100h` restantes (5 casos) son fines de semana
+largos ordinarios, no anomalías sin explicar.
+
+**Correcciones de código detectadas y aplicadas durante esta revisión** (no
+afectan las filas del dataset, solo la implementación):
+
+- `compute_gaps` había quedado con una firma nueva (`df, infos`) sin que las
+  dos pruebas unitarias que la invocaban se actualizaran; corregido.
+- Quedaban dos bloques de código muerto (`def_validate_source_filenames_anterior`,
+  `compute_gaps_anterior`), versiones previas de funciones guardadas como
+  strings sin usar; eliminados.
+- Se agregó una prueba unitaria explícita
+  (`test_overlapping_contracts_same_timestamp_produce_no_gap`) que fija
+  como contrato de regresión que dos contratos con timestamps compartidos
+  durante un rollover NO generan una fila en el catálogo de gaps — distinto
+  de un duplicado real (`timestamp`+`contract` idénticos), que sigue
+  deteniendo la ingestión.
+
+**Pendientes de S00 sin cambios:** confirmación documental de zona horaria
+y de `timestamp_semantics` siguen sin resolverse (no hay evidencia nueva
+del proveedor). El chequeo automatizado de solapamiento entre archivos
+sigue siendo una mejora menor pendiente.
+
+Reejecutado: 26/26 pruebas unitarias + 10/10 de integración de S00 pasan
+contra el corpus actualizado.
